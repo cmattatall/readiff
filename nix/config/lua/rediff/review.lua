@@ -432,15 +432,16 @@ function M.show(index, snapshot, keep_fold)
 	map_staging(s.old_buf)
 	map_staging(s.new_buf)
 	local renderer = require("codediff.ui.view.render")
+	local path = " %<" .. vim.fn.strtrans(snapshot.path):gsub("%%", "%%%%")
 	if s.layout == "merged" then
-		vim.wo[s.new_win].winbar = " MERGED · red: old / green: new · :view split for old-line selections"
+		vim.wo[s.new_win].winbar = path .. " %= MERGED · red: old / green: new "
 		vim.wo[s.new_win].scrollbind = false
 		vim.wo[s.new_win].wrap = false
 		s.diff = assert(require("codediff.core.diff").compute_diff(old_lines, new_lines, renderer.diff_options()))
 		require("codediff.ui.inline").render_inline_diff(s.new_buf, s.diff, old_lines, new_lines, { filetype = ft })
 	else
-		vim.wo[s.old_win].winbar = " OLD · " .. (snapshot.group == "staged" and "HEAD" or "INDEX")
-		vim.wo[s.new_win].winbar = " NEW · " .. (snapshot.group == "staged" and "INDEX" or "WORKTREE")
+		vim.wo[s.old_win].winbar = path .. " %= OLD · " .. (snapshot.group == "staged" and "HEAD" or "INDEX") .. " "
+		vim.wo[s.new_win].winbar = path .. " %= NEW · " .. (snapshot.group == "staged" and "INDEX" or "WORKTREE") .. " "
 		s.diff = renderer.compute_and_render(
 			s.old_buf,
 			s.new_buf,

@@ -97,13 +97,15 @@ Implemented: tree/diff focus and pane switching; cross-file counted hunk and
 file navigation; fuzzy file/content search; staged/unstaged groups and status badges;
 hunk/file staging; protected diffs;
 line/range feedback drafts; help; live/manual refresh; and worktree switching
-and creation with a selected harness process.
+and creation with a selected harness process. Our gitgud plugin provides line,
+full-file and inline blame plus clickable GitHub PR links in editing and Review.
+PR links are displayed, never opened on the remote SSH host.
 
 Partial: annotations support native editing, exact ranges, fuzzy discovery and
 next/previous navigation, but not revdiff's file/hunk scopes. Display and
 command-palette parity is selective.
 
-Pending: Review hover/reference navigation; blame views; collapsed
+Pending: Review hover/reference navigation; collapsed
 and compact diff presentation; file/hunk-level annotations; and
 the remaining view toggles, filters, and general commands in the revdiff fork.
 

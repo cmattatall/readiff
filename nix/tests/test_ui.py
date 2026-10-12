@@ -1,8 +1,10 @@
 """Exercise real startup, key input and layouts through Neovim's UI protocol."""
 
+import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -535,6 +537,71 @@ class EditorUI(unittest.TestCase):
                             "return #require('rediff.connections').connected()"
                         ),
                     )
+
+    def test_harness_reconnects_after_disconnect_and_restart_without_spawning(self):
+        binary = Path(self.directory.name, "bin")
+        binary.mkdir()
+        log = Path(self.directory.name, "unexpected-cli")
+        for provider in ("amp", "omp"):
+            cli = binary / provider
+            cli.write_text('#!/bin/sh\necho spawned >> "$HARNESS_TEST_LOG"\n')
+            cli.chmod(0o755)
+        os.environ["PATH"] = str(binary) + os.pathsep + os.environ["PATH"]
+        os.environ["HARNESS_TEST_LOG"] = str(log)
+        bridge = """
+            local system=vim.system
+            vim.system=function(argv,opts,callback)
+                if argv[1]=='rediff-live' and argv[2]=='discover' then
+                    local provider=vim.env.HARNESS_TEST_PROVIDER
+                    callback({code=0,stdout=vim.json.encode({
+                        {provider=provider,root=vim.fn.getcwd(),session='T-11111111-2222-4333-8444-555555555555',connection='/live/endpoint'},
+                        {provider=provider,root=vim.fn.getcwd()..'/other',session='other-session',connection='/other/endpoint'},
+                    })})
+                    return
+                end
+                return system(argv,opts,callback)
+            end
+            vim.fn.confirm=function(prompt) vim.g.resume_prompt=prompt; return 1 end
+        """
+        for provider in ("amp", "omp"):
+            with self.subTest(provider=provider):
+                os.environ["HARNESS_TEST_PROVIDER"] = provider
+                editor = self.launch(self.root, file="auth.lua", before_init=bridge)
+                self.keys(editor, f":harness connect {provider}<CR>")
+                self.wait_for(editor, "#require('rediff.connections').connected()==1")
+                self.keys(editor, ":harness disconnect<CR>")
+                self.assertEqual(
+                    0,
+                    self.lua(
+                        editor, "return #require('rediff.connections').connected()"
+                    ),
+                )
+                try:
+                    editor.command("qa!")
+                except EOFError:
+                    pass
+                editor.close()
+                self.editors.remove(editor)
+
+                editor = self.launch(self.root, file="auth.lua", before_init=bridge)
+                self.keys(editor, ":harness open<CR>")
+                self.wait_for(editor, "vim.bo.filetype=='rediff-harness-panel'")
+                self.assertEqual(
+                    [
+                        provider + "-live",
+                        "T-11111111-2222-4333-8444-555555555555",
+                        self.root,
+                    ],
+                    self.lua(
+                        editor,
+                        "local t=require('rediff.connections').connected()[1]; return {t.name,t.session,t.root}",
+                    ),
+                )
+                self.keys(editor, "q:harness resume<CR>")
+                self.wait_for(editor, "vim.bo.filetype=='rediff-harness-panel'")
+                self.assertIsNone(editor.vars.get("resume_prompt"))
+                self.assertFalse(log.exists(), "Reconnect must not start another CLI")
+                self.keys(editor, "q:harness disconnect<CR>")
 
     def test_resumed_harness_reconnects_before_flushing_annotations(self):
         binary = Path(self.directory.name, "bin")
@@ -1204,6 +1271,300 @@ class EditorUI(unittest.TestCase):
         """,
                 self.root,
             ),
+        )
+
+    def test_blame_uses_buffer_and_review_snapshot_contents(self):
+        path = Path(self.root, "history space %.txt")
+
+        def git(*args):
+            return (
+                subprocess.check_output(["git", "-C", self.root, *args])
+                .decode()
+                .strip()
+            )
+
+        path.write_text("alpha original\nbeta original\ngamma original\n")
+        git("add", "--", path.name)
+        git(
+            "commit",
+            "--author=First Author <first@example.invalid>",
+            "-m",
+            "First lines",
+        )
+        path.write_text("alpha original\nbeta revised\ngamma original\n")
+        git("add", "--", path.name)
+        git(
+            "commit",
+            "--author=Second Author <second@example.invalid>",
+            "-m",
+            "Revise beta",
+        )
+        committed = git("rev-parse", "HEAD")
+        path.write_text(
+            "staged insertion\nalpha original\nbeta revised\ngamma staged\n"
+        )
+        git("add", "--", path.name)
+        path.write_text(
+            "worktree insertion\nstaged insertion\nalpha original\nbeta revised\ngamma staged\n"
+        )
+        index = git("write-tree")
+        # The editor's cwd is deliberately outside the repository.
+        editor = self.launch(self.directory.name, file=str(path))
+
+        def blame(line, expected, key=" gb"):
+            window = editor.current.window.handle
+            editor.current.window.cursor = (line, 0)
+            self.keys(editor, key)
+            self.wait_for(
+                editor,
+                f"table.concat(vim.api.nvim_buf_get_lines(0,0,-1,false),'\\n'):find({json.dumps(expected)},1,true) ~= nil",
+            )
+            self.assertNotEqual(window, editor.current.window.handle)
+            text = "\n".join(editor.current.buffer[:])
+            self.keys(editor, "q")
+            self.assertEqual(window, editor.current.window.handle)
+            return text
+
+        def full_blame(authors):
+            window = editor.current.window.handle
+            source_lines = editor.current.buffer[:]
+            editor.command("GitGud blame")
+            self.wait_for(
+                editor,
+                "table.concat(vim.api.nvim_buf_get_lines(0,0,-1,false),' '):find('Second Author',1,true) ~= nil",
+            )
+            for i, (author, text) in enumerate(zip(authors, source_lines, strict=True)):
+                line = editor.current.buffer[i]
+                self.assertIn(author, line)
+                self.assertTrue(line.endswith(text), line)
+            self.assertFalse(editor.current.buffer.options["modifiable"])
+            editor.current.window.cursor = (2, 0)
+            self.keys(editor, "<CR>")
+            self.assertEqual(window, editor.current.window.handle)
+            self.assertEqual((2, 0), editor.current.window.cursor)
+
+        pending = "Not committed yet"
+        full_blame([pending, pending, "First Author", "Second Author", pending])
+        self.assertIn(committed[:12], blame(4, "Second Author"))
+        editor.current.buffer[0:0] = ["unsaved insertion"]
+        blame(5, "Second Author")
+        full_blame(
+            [pending, pending, pending, "First Author", "Second Author", pending]
+        )
+        blame(1, "Not committed yet", ":gitgud pr<CR>")
+        self.assertEqual(0, editor.funcs.exists(":Gitsigns"))
+        self.assertEqual(0, editor.funcs.exists(":GitBlame"))
+        self.assertEqual(
+            ["blame", "blame-line", "blame-toggle", "pr"],
+            editor.funcs.getcompletion("GitGud ", "cmdline"),
+        )
+        self.assertEqual("", editor.funcs.maparg("<Space>gP", "n"))
+        editor.command("edit!")
+        editor.command("tcd " + self.root)
+        editor.command("Review")
+        self.lua(editor, "require('rediff.live').stop(s)")
+
+        def source(group, side):
+            editor.exec_lua(
+                """
+                local r = require('rediff.review'); local s = r.active()
+                for i, e in ipairs(s.entries) do
+                    if e.path == 'history space %.txt' and e.group == ... then r.show(i); break end
+                end
+                """,
+                group,
+            )
+            self.lua(editor, f"vim.api.nvim_set_current_win(s.{side}_win)")
+
+        source("staged", "old")
+        blame(2, "Second Author")
+        full_blame(["First Author", "Second Author", "First Author"])
+        source("staged", "new")
+        blame(3, "Second Author")
+        full_blame([pending, "First Author", "Second Author", pending])
+        blame(1, "Not committed yet")
+        source("unstaged", "old")
+        blame(3, "Second Author")
+        source("unstaged", "new")
+        blame(4, "Second Author")
+        editor.command("View merged")
+        blame(4, "Second Author")
+        full_blame([pending, pending, "First Author", "Second Author", pending])
+        blame(1, "Not committed yet")
+        self.assertEqual(index, git("write-tree"))
+        # A saved snapshot must retain its history even after HEAD moves.
+        path.write_text("a completely different committed file\n")
+        git("add", "--", path.name)
+        git(
+            "commit",
+            "--author=Third Author <third@example.invalid>",
+            "-m",
+            "Replace file",
+        )
+        self.assertIn(committed[:12], blame(4, "Second Author"))
+        full_blame([pending, pending, "First Author", "Second Author", pending])
+
+    def test_gitgud_inline_blame_discards_stale_results(self):
+        editor = self.launch(self.root, file="auth.lua")
+        visible = """(function()
+            local text = {}
+            for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(0,-1,0,-1,{details=true})) do
+                for _, chunk in ipairs(mark[4].virt_text or {}) do table.insert(text, chunk[1]) end
+            end
+            return table.concat(text, ' ')
+        end)()"""
+        self.keys(editor, ":gitgud blame-toggle<CR>")
+        self.wait_for(editor, visible + ":find('Review Test',1,true) ~= nil")
+        self.keys(editor, "4j")
+        editor.command("doautocmd CursorHold")
+        self.wait_for(editor, visible + ":find('Not committed yet',1,true) ~= nil")
+        self.keys(editor, "gg")
+        editor.command("doautocmd CursorHold")
+        self.wait_for(editor, visible + ":find('Review Test',1,true) ~= nil")
+        self.keys(editor, "Iunsaved <Esc>")
+        editor.command("doautocmd CursorHold")
+        self.wait_for(editor, visible + ":find('Not committed yet',1,true) ~= nil")
+        editor.command("GitGud blame-toggle")
+        self.assertEqual("", self.lua(editor, "return " + visible))
+        editor.command("edit!")
+        editor.command("Review")
+        self.lua(
+            editor,
+            "for i,e in ipairs(s.entries) do if e.path == 'auth.lua' then r.show(i); break end end; vim.api.nvim_set_current_win(s.old_win)",
+        )
+        editor.current.window.cursor = (5, 0)
+        pump(editor)
+        editor.command("GitGud blame-toggle")
+        self.wait_for(editor, visible + ":find('Review Test',1,true) ~= nil")
+        self.lua(editor, "vim.api.nvim_set_current_win(s.new_win)")
+        editor.current.window.cursor = (5, 0)
+        pump(editor)
+        editor.command("doautocmd CursorHold")
+        self.wait_for(editor, visible + ":find('Not committed yet',1,true) ~= nil")
+        editor.command("GitGud blame-toggle")
+        # Hold one real Git response until after focus and line have changed.
+        editor.exec_lua("""
+            local system = vim.system
+            vim.system = function(argv, opts, callback)
+                if argv[3] == 'blame' then
+                    return system(argv, opts, function(result)
+                        vim.schedule(function()
+                            finish_blame = function() callback(result) end
+                        end)
+                    end)
+                end
+                return system(argv, opts, callback)
+            end
+            restore_system = function() vim.system = system end
+        """)
+        editor.command("GitGud blame-toggle")
+        self.wait_for(editor, "finish_blame ~= nil")
+        self.keys(editor, "k")
+        editor.exec_lua("restore_system(); finish_blame()")
+        pump(editor)
+        self.assertNotIn("Not committed yet", self.lua(editor, "return " + visible))
+        editor.command("doautocmd CursorHold")
+        self.wait_for(editor, visible + ":find('Review Test',1,true) ~= nil")
+        editor.command("GitGud blame-toggle")
+        self.assertEqual("", self.lua(editor, "return " + visible))
+
+    def test_pr_links_are_clickable_without_opening_remote_browser(self):
+        editor = self.launch(self.root, file="auth.lua", columns=72)
+        sha = (
+            subprocess.check_output(["git", "-C", self.root, "rev-parse", "HEAD"])
+            .decode()
+            .strip()
+        )
+        bin_dir = Path(self.directory.name, "bin")
+        bin_dir.mkdir()
+        response = Path(self.directory.name, "response")
+        response.write_text(
+            "#42 Fix authentication\nhttps://github.com/example/project/pull/42\n\n#81 Backport fix\nhttps://github.com/example/project/pull/81\n"
+        )
+        fake_gh = bin_dir / "gh"
+        fake_gh.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib, sys, time\n"
+            f"assert os.getcwd() == {self.root!r}\n"
+            "assert '--web' not in sys.argv\n"
+            "assert sys.argv[1] == 'api'\n"
+            f"assert 'repos/{{owner}}/{{repo}}/commits/{sha}/pulls' in sys.argv\n"
+            f"value = pathlib.Path({str(response)!r}).read_text()\n"
+            "if value == 'delay': time.sleep(1); value = 'https://github.com/example/project/pull/99'\n"
+            "if value == 'error': sys.stderr.write('GitHub authentication required'); sys.exit(1)\n"
+            "print(value)\n"
+        )
+        fake_gh.chmod(0o755)
+        editor.exec_lua(
+            "vim.env.PATH = ... .. ':' .. vim.env.PATH; vim.ui.open = function() error('Must not open remote browser') end",
+            str(bin_dir),
+        )
+
+        def popup(command, text):
+            editor.command(command)
+            self.wait_for(
+                editor,
+                f"table.concat(vim.api.nvim_buf_get_lines(0,0,-1,false),'\\n'):find({json.dumps(text)},1,true) ~= nil",
+            )
+
+        # OLD line 5 is committed; the same line in NEW is not.
+        editor.command("Review")
+        self.lua(
+            editor,
+            "for i,e in ipairs(s.entries) do if e.path == 'auth.lua' then r.show(i); break end end; vim.api.nvim_set_current_win(s.old_win)",
+        )
+        editor.current.window.cursor = (5, 0)
+        popup("GitGud pr", "/pull/81")
+        links = editor.exec_lua(
+            "local urls = {}; for _,m in ipairs(vim.api.nvim_buf_get_extmarks(0,-1,0,-1,{details=true})) do if m[4].url then table.insert(urls,m[4].url) end end; return urls"
+        )
+        self.assertEqual(
+            [
+                "https://github.com/example/project/pull/42",
+                "https://github.com/example/project/pull/81",
+            ],
+            links,
+        )
+        row = editor.current.buffer[:].index(links[0]) + 1
+        editor.current.window.cursor = (row, 0)
+        self.keys(editor, "y")
+        self.assertEqual(links[0], editor.funcs.getreg('"'))
+        self.keys(editor, "q")
+        # The same PR action is available from a selected full-file blame row.
+        popup("GitGud blame", "return false")
+        editor.current.window.cursor = (5, 0)
+        self.keys(editor, "p")
+        self.wait_for(
+            editor,
+            "table.concat(vim.api.nvim_buf_get_lines(0,0,-1,false),' '):find('/pull/81',1,true) ~= nil",
+        )
+        self.assertIn("auth.lua:5", "\n".join(editor.current.buffer[:]))
+        self.keys(editor, "qq")
+        self.lua(editor, "vim.api.nvim_set_current_win(s.new_win)")
+        editor.current.window.cursor = (5, 0)
+        popup("GitGud pr", "Not committed yet")
+        self.keys(editor, "q")
+        editor.command("ReviewLeave")
+        editor.current.window.cursor = (1, 0)
+        popup("GitGud pr", "/pull/81")
+        self.keys(editor, "q")
+        response.write_text("")
+        popup("GitGud pr", "No pull request")
+        self.keys(editor, "q")
+        response.write_text("error")
+        popup("GitGud pr", "GitHub authentication required")
+        self.keys(editor, "q")
+        response.write_text("delay")
+        window = editor.current.window.handle
+        popup("GitGud pr", "Looking up pull requests")
+        self.keys(editor, "q")
+        time.sleep(1.1)
+        pump(editor)
+        self.assertEqual(window, editor.current.window.handle)
+        self.assertFalse(
+            any(
+                editor.api.win_get_config(w)["relative"] for w in editor.api.list_wins()
+            )
         )
 
     def test_help_pages_like_man_without_changing_workspace_keys(self):
@@ -2146,6 +2507,82 @@ class EditorUI(unittest.TestCase):
                 shows, self.lua(editor, "return vim.g.annotation_show_count")
             )
 
+    def test_harness_open_without_configuration_and_after_amp_exit(self):
+        binary = Path(self.directory.name, "bin")
+        binary.mkdir()
+        cli = binary / "amp"
+        log = Path(self.directory.name, "amp-launches")
+        thread = "T-11111111-2222-4333-8444-555555555555"
+        cli.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys, tempfile\n"
+            "from pathlib import Path\n"
+            "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+            "if sys.argv[1:3] == ['threads', 'export']: sys.exit(0)\n"
+            "with open(os.environ['HARNESS_TEST_LOG'], 'a') as log:\n"
+            "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "registry = Path.home() / '.cache/rediff/amp'\n"
+            "registry.mkdir(parents=True, mode=0o700, exist_ok=True)\n"
+            "directory = Path(tempfile.mkdtemp(prefix='session-', dir=registry))\n"
+            f"identity = {{'version': 1, 'root': os.getcwd(), 'thread': '{thread}'}}\n"
+            "class Handler(BaseHTTPRequestHandler):\n"
+            "    def do_GET(self):\n"
+            "        self.send_response(200); self.end_headers()\n"
+            "        self.wfile.write(json.dumps(identity).encode())\n"
+            "    def log_message(self, *_): pass\n"
+            "server = HTTPServer(('127.0.0.1', 0), Handler)\n"
+            "descriptor = directory / 'connection.json'\n"
+            "descriptor.write_text(json.dumps(dict(identity, token='test',\n"
+            "    url=f'http://127.0.0.1:{server.server_port}/feedback')))\n"
+            "descriptor.chmod(0o600)\n"
+            "print('Amp test terminal ready', flush=True)\n"
+            "try: server.serve_forever()\n"
+            "except KeyboardInterrupt: pass\n"
+            "finally: server.server_close()\n"
+        )
+        cli.chmod(0o755)
+        os.environ["PATH"] = str(binary) + os.pathsep + os.environ["PATH"]
+        os.environ["HARNESS_TEST_LOG"] = str(log)
+        editor = self.launch(self.root)
+        # No settings and no live registry: cancelling the provider picker is safe.
+        self.keys(editor, ":harness open<CR>")
+        self.wait_for(editor, "vim.api.nvim_get_mode().mode == 'c'")
+        self.keys(editor, "<CR>")
+        self.assertFalse(log.exists())
+        self.keys(editor, ":harness open<CR>")
+        self.wait_for(editor, "vim.api.nvim_get_mode().mode == 'c'")
+        self.keys(editor, "1<CR>")
+        self.wait_for(editor, "vim.bo.buftype == 'terminal'")
+        self.wait_for(editor, "table.concat(vim.api.nvim_buf_get_lines(0,0,-1,false),'\\n'):find('Amp test terminal ready',1,true) ~= nil")
+        self.assertEqual(["[]"], log.read_text().splitlines())
+        self.keys(editor, "<Esc>:harness connect amp<CR>")
+        self.wait_for(editor, "require('rediff.harness').get(s.root).target.name == 'amp-live'")
+        self.lua(editor, "vim.fn.confirm=function() return 1 end")
+        for restart in (False, True):
+            job = editor.current.buffer.vars["terminal_job_id"]
+            self.keys(editor, "i")
+            self.keys(editor, "<C-c>")
+            self.wait_for(editor, f"vim.fn.jobwait({{{job}}},0)[1] == -3")
+            self.keys(editor, "<Esc>")
+            if restart:
+                try:
+                    editor.command("qa!")
+                except EOFError:
+                    pass
+                editor.close()
+                self.editors.remove(editor)
+                editor = self.launch(self.root, file="auth.lua")
+                self.lua(editor, "vim.fn.confirm=function() return 1 end")
+            self.keys(editor, ":harness open<CR>")
+            self.wait_for(editor, "vim.bo.buftype == 'terminal' and vim.fn.jobwait({vim.b.terminal_job_id},0)[1] == -1")
+            self.wait_for(editor, "table.concat(vim.api.nvim_buf_get_lines(0,0,-1,false),'\\n'):find('Amp test terminal ready',1,true) ~= nil")
+            self.wait_for(editor, "require('rediff.harness').get(require('rediff.git').root()).connection_error == nil")
+            self.assertEqual(thread, self.lua(editor, "return require('rediff.harness').get(require('rediff.git').root()).target.session"))
+        self.assertEqual(
+            [[], ["threads", "continue", thread], ["threads", "continue", thread]],
+            [json.loads(line) for line in log.read_text().splitlines()],
+        )
+
     def test_startup_opens_configured_harness_once(self):
         binary = Path(self.directory.name, "bin")
         binary.mkdir()
@@ -2184,8 +2621,24 @@ class EditorUI(unittest.TestCase):
         self.assertIn("Could not open harness", missing.vars["startup_notice"])
         self.assertFalse(log.exists())
         self.keys(missing, ":ReviewLeave<CR>")
-        editor = self.launch(self.root)
+        editor = self.launch(self.root, before_init="""
+            local system=vim.system
+            local delayed=false
+            vim.system=function(argv,opts,callback)
+                if argv[1]=='rediff-amp-live' and argv[2]=='startup' and not delayed then
+                    delayed=true
+                    return system(argv,opts,function(result)
+                        _G.complete_startup=function() callback(result) end
+                    end)
+                end
+                return system(argv,opts,callback)
+            end
+        """)
+        self.wait_for(editor, "complete_startup ~= nil")
+        self.keys(editor, ":harness open<CR>")
         self.wait_for(editor, "vim.bo.buftype == 'terminal'")
+        self.lua(editor, "complete_startup()")
+        pump(editor)
         self.wait_for(editor, "vim.fn.filereadable(vim.env.HARNESS_TEST_LOG) == 1")
         self.assertEqual([self.root], log.read_text().splitlines())
         self.assertEqual("t", editor.api.get_mode()["mode"])
@@ -4526,7 +4979,8 @@ with open(sys.argv[1], 'ab', buffering=0) as log:
         for provider in ("amp", "claude"):
             executable = binary / provider
             executable.write_text(
-                '#!/bin/sh\nprintf "%s\\n" "$0" "$PWD" "$@" > "$HARNESS_TEST_LOG"\n'
+                '#!/bin/sh\nif [ "$1 $2" = "threads export" ]; then exit 0; fi\n'
+                'printf "%s\\n" "$0" "$PWD" "$@" > "$HARNESS_TEST_LOG"\n'
                 'echo "Resumed harness ready"\nexec sleep 600\n'
             )
             executable.chmod(0o755)
@@ -4553,16 +5007,13 @@ with open(sys.argv[1], 'ab', buffering=0) as log:
                 """,
                 )
                 self.keys(editor, ":harness open<CR>")
+                self.wait_for(editor, "vim.g.resume_prompt ~= nil")
                 self.assertFalse(
                     log.exists(),
                     "Open must not silently resume an external session",
                 )
-                if provider == "amp":
-                    self.assertIsNone(editor.vars.get("resume_prompt"))
-                    self.assertEqual("rediff-harness-panel", editor.current.buffer.options["filetype"])
-                    self.assertEqual(session, self.lua(editor, "return s.harness.session"))
-                    self.assertIn("existing terminal", editor.vars["startup_notice"])
-                    self.keys(editor, "q")
+                self.assertNotEqual("rediff-harness-panel", editor.current.buffer.options["filetype"])
+                self.assertEqual(session, self.lua(editor, "return s.harness.session"))
                 self.keys(editor, ":harness resume<CR>")
                 self.assertFalse(
                     log.exists(), "Cancelling resume must not spawn a process"
@@ -5015,23 +5466,98 @@ with open(sys.argv[1], 'ab', buffering=0) as log:
             )
         )
 
+    def test_file_paths_are_visible_above_review_and_edit_windows(self):
+        names = ("src/100% ready.lua", "tests/100% ready.lua")
+        for name in names:
+            path = Path(self.root, name)
+            path.parent.mkdir(exist_ok=True)
+            path.write_text("return true\n")
+        editor = self.launch(self.root, file=names[0])
+
+        def header(win):
+            return editor.api.eval_statusline(editor.api.get_option_value("winbar", {"win": win}), {
+                "winid": win, "use_winbar": True, "maxwidth": editor.api.win_get_width(win),
+            })["str"]
+
+        first = editor.current.window.handle
+        self.assertIn(names[0], header(first))
+        editor.command("vsplit " + editor.funcs.fnameescape(names[1]))
+        second = editor.current.window.handle
+        self.assertIn(names[0], header(first))
+        self.assertIn(names[1], header(second))
+        editor.command("file tests/renamed.lua")
+        self.assertIn("tests/renamed.lua", header(second))
+        self.keys(editor, ":Review<CR>")
+        for layout in ("split", "merged", "split"):
+            self.lua(editor, f"r.view('{layout}')")
+            for name in names:
+                editor.exec_lua("""
+                    local r=require('rediff.review')
+                    for i,e in ipairs(r.state.entries) do
+                        if e.path==... then r.show(i); return end
+                    end
+                    error('Missing test file')
+                """, name)
+                windows = self.lua(editor, "return {s.new_win, s.old_win}")
+                for win in windows:
+                    self.assertIn(name, header(win))
+                self.assertIn("MERGED" if layout == "merged" else "NEW", header(windows[0]))
+                if layout == "split":
+                    self.assertIn("OLD", header(windows[1]))
+        self.keys(editor, ":ReviewLeave<CR>")
+        self.assertIn(names[0], header(first))
+        self.assertIn("tests/renamed.lua", header(second))
+
     def test_red_green_diff_backgrounds_preserve_syntax_after_theme_reload(self):
+        def luminance(color):
+            channels = [(color >> shift & 255) / 255 for shift in (16, 8, 0)]
+            linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+            return sum(c * weight for c, weight in zip(linear, (0.2126, 0.7152, 0.0722)))
+
+        def assert_readable(foreground, background):
+            light, dark = sorted((luminance(foreground), luminance(background)), reverse=True)
+            self.assertGreaterEqual((light + 0.05) / (dark + 0.05), 4.5)
+
+        path = Path(self.root, "contrast.nix")
+        path.write_text("{\n  script = ./tooling/old.nix;\n  # old comment\n}\n")
+        subprocess.run(["git", "-C", self.root, "add", "contrast.nix"], check=True)
+        path.write_text("{\n  script = ./tooling/new.nix;\n  # new comment\n}\n")
         editor = self.launch(self.root)
+        self.lua(editor, "for i,e in ipairs(s.entries) do if e.path=='contrast.nix' and e.group=='unstaged' then r.show(i); break end end")
         for reload_theme in (False, True):
             if reload_theme:
                 editor.command("colorscheme rose-pine")
-            for name, background in (
-                ("CodeDiffLineInsert", 0x234B2C),
-                ("CodeDiffLineDelete", 0x602A2A),
-                ("CodeDiffCharInsert", 0x356B3E),
-                ("CodeDiffCharDelete", 0x8A3939),
+            backgrounds = {}
+            for name in (
+                "CodeDiffLineInsert", "CodeDiffLineDelete",
+                "CodeDiffCharInsert", "CodeDiffCharDelete",
             ):
                 highlight = editor.api.get_hl(0, {"name": name})
-                self.assertEqual(background, highlight["bg"])
+                backgrounds[name] = highlight["bg"]
                 self.assertNotIn(
                     "fg", highlight, "Diff backgrounds must retain syntax colors"
                 )
                 self.assertFalse(highlight.get("nocombine", False))
+                for syntax in ("Normal", "Include", "Keyword", "Comment", "String", "Function", "Type"):
+                    foreground = editor.api.get_hl(0, {"name": syntax, "link": False})["fg"]
+                    with self.subTest(theme_reload=reload_theme, background=name, syntax=syntax):
+                        assert_readable(foreground, highlight["bg"])
+            self.assertEqual(4, len(set(backgrounds.values())), "Keep line and token additions/deletions distinct")
+            for layout in ("split", "merged"):
+                self.lua(editor, f"r.view('{layout}')")
+                self.wait_for(editor, "s.diff_engine == 'difftastic'")
+                editor.command("redraw!")
+                pump(editor)
+                for win in ("new_win", "old_win") if layout == "split" else ("new_win",):
+                    for row, column in ((2, 17), (3, 6)):
+                        cell = self.lua(editor,
+                            f"local p=vim.fn.screenpos(s.{win},{row},{column}); "
+                            "return vim.api.nvim__inspect_cell(1,p.row-1,p.col-1)")
+                        self.assertNotEqual(" ", cell[0])
+                        with self.subTest(theme_reload=reload_theme, layout=layout, window=win, row=row):
+                            assert_readable(cell[1]["foreground"], cell[1]["background"])
+        # Deleted merged lines synthesize their own syntax/background combinations.
+        self.lua(editor, "for i,e in ipairs(s.entries) do if e.path=='auth.lua' then r.show(i); break end end")
         self.keys(editor, ":view merged<CR>")
         self.assertTrue(
             self.lua(
@@ -5053,11 +5579,14 @@ with open(sys.argv[1], 'ab', buffering=0) as log:
         """,
         )
         highlights = [editor.api.get_hl(0, {"name": group}) for group in deleted_groups]
-        self.assertEqual({0x602A2A, 0x8A3939}, {hl["bg"] for hl in highlights})
+        self.assertEqual({backgrounds["CodeDiffLineDelete"], backgrounds["CodeDiffCharDelete"]}, {hl["bg"] for hl in highlights})
         self.assertTrue(
             any("fg" in hl for hl in highlights),
             "Deleted virtual lines need syntax colors too",
         )
+        normal = editor.api.get_hl(0, {"name": "Normal"})["fg"]
+        for highlight in highlights:
+            assert_readable(highlight.get("fg", normal), highlight["bg"])
 
     def test_git_detected_renames_keep_both_snapshot_paths(self):
         original = subprocess.check_output(

@@ -6,6 +6,7 @@
   neovim,
   makeWrapper,
   git,
+  gh,
   ripgrep,
   fzf,
   difftastic,
@@ -73,6 +74,7 @@ stdenv.mkDerivation {
       --prefix PATH : ${
         lib.makeBinPath [
           git
+          gh
           ripgrep
           fzf
           difftastic

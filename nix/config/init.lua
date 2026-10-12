@@ -21,7 +21,13 @@ vim.opt.shiftwidth = 2
 vim.opt.tabstop = 2
 vim.opt.autowrite = false
 vim.opt.autowriteall = false
-require("rose-pine").setup({ variant = "main", dark_variant = "main" })
+require("rose-pine").setup({
+	variant = "main",
+	dark_variant = "main",
+	-- Dark teal keywords/paths and muted comments disappear on diff backgrounds.
+	palette = { main = { pine = "#8fc3ce" } },
+	highlight_groups = { Comment = { fg = "#b9b6cd" } },
+})
 vim.cmd.colorscheme("rose-pine")
 vim.fn.mkdir(vim.fn.stdpath("data"), "p")
 
@@ -83,10 +89,10 @@ require("codediff").setup({
 	-- Blank filler rows preserve alignment without rendering wide patterns per line.
 	diff = { compute_moves = false, highlight_priority = 150, filler_text = "" },
 	highlights = {
-		line_insert = "#234b2c",
-		line_delete = "#602a2a",
-		char_insert = "#356b3e",
-		char_delete = "#8a3939",
+		line_insert = "#23412b",
+		line_delete = "#50272c",
+		char_insert = "#2e5037",
+		char_delete = "#70343c",
 	},
 })
 require("review.config").setup({ export = { clipboard = false, clear_on_close = false } })
@@ -188,6 +194,7 @@ review.setup()
 require("rediff.harness").setup()
 require("rediff.worktree").setup()
 require("rediff.cmdline").setup()
+require("rediff.history").setup()
 require("fzf-lua").setup({
 	winopts = { width = 0.85, height = 0.8, preview = { hidden = true } },
 	keymap = { fzf = { ["esc"] = "abort" } },
@@ -232,3 +239,13 @@ vim.keymap.set("n", "<leader>E", function()
 end, { desc = "Toggle file tree (focus in Review)" })
 vim.opt.laststatus = 3
 vim.opt.statusline = "%{%v:lua.require('rediff.review').statusline()%}"
+local file_winbar = " %<%f %m"
+vim.api.nvim_create_autocmd("BufWinEnter", {
+	callback = function()
+		if vim.bo.buftype == "" and vim.api.nvim_win_get_config(0).relative == "" then
+			vim.wo.winbar = file_winbar
+		elseif vim.wo.winbar == file_winbar then
+			vim.wo.winbar = ""
+		end
+	end,
+})

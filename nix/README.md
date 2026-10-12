@@ -406,15 +406,23 @@ either mode keeps it hidden across toggles until **:ho** reopens it.
 **:harness open** / **:ho** opens the current worktree's selected harness, or its
 only connected/editor-owned harness, without a chooser. Multiple local harnesses
 with no selected default prompt for a choice; other worktrees are excluded.
+With no session or configured provider, it asks which harness to start and saves
+that provider for the worktree. Cancelling the picker starts nothing.
 Opening a connected session makes it this worktree's annotation target.
 An editor-owned TUI reopens its existing terminal. An external live connection
 opens the connection/activity panel instead, without a resume prompt or another CLI.
 The bridge carries annotations and activity, not the external terminal's screen or
 keyboard input; continue chatting and interrupting work in its original terminal.
-With no available/selected session, it starts the selected CLI in the current worktree.
-**:harness resume** explicitly asks before starting another TUI for the same Amp/Claude
-session; stop using its other terminal first. Saved sessions without a live bridge
-also offer this confirmation on open. This is not process attachment or a new thread.
+After a disconnect, **:harness open** rediscovers live sessions, including after
+restarting Neovim or opening a file instead of Review. Without a live match, Amp
+checks its saved thread before starting fresh; other adapters retain their launch behavior.
+Saved connections are rechecked before opening the activity panel: after Amp exits
+(including Ctrl-C), opening it again offers to resume the saved thread in a new TUI.
+**:harness resume** also reconnects to a live session rather than starting another
+CLI. If the selected session is live in another worktree, it refuses to launch.
+For saved Amp/Claude sessions without a live bridge, resume asks before starting
+a TUI; stop using any other terminal for that session first. This is not process
+attachment or a new thread.
 A resumed live Amp session reconnects feedback when its plugin registers
 a fresh endpoint for the same thread and worktree. Until then, annotations stay saved;
 retry **:w** after it connects. OMP resumption is unsupported.

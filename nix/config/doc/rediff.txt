@@ -93,6 +93,42 @@ See |rediff-drafts| for retention and retry.
 ==============================================================================
 GIT AND REFRESH                                                    *rediff-git*
 
+gitgud provides one interface in ordinary files and Review source panes:
+  Space g b / :GitGud blame-line   Show author, date and commit for this line
+  Space g B / :GitGud blame        Browse blame for every source line
+  Space g i / :GitGud blame-toggle Toggle inline blame for the focused line
+  Space g p / :GitGud pr           Show this line's associated PR links
+
+:gitgud is a typed alias for :GitGud. Tab completes subcommands. :GitGud without
+arguments opens full-file blame. In blame views, p shows the selected line's PRs;
+in full-file blame, Enter returns to that source line. q/Esc closes the view.
+Full-file blame is read-only and keeps your editor/Review layout intact.
+
+The popup displays HTTPS links with terminal hyperlinks (OSC 8). Use your local
+terminal's link-click modifier, usually Cmd-click on macOS; no browser command
+runs on the remote SSH host. q/Esc closes; y on a URL yanks it to Neovim's unnamed
+register. Terminal selection/copy works too. Wrapped links remain hyperlinks in
+terminals supporting OSC 8; terminal/tmux settings may affect click handling.
+PR lookups require gh authentication on the machine running Neovim (gh auth login).
+Missing PRs and lookup errors are reported in the popup, never silently ignored.
+
+Review blames the selected OLD/NEW snapshot, not the current on-disk file. Normal
+editing includes unsaved buffer contents. New/uncommitted lines have no commit
+or PR. Merged-view red deletions are virtual lines: switch to split view and use
+the OLD pane to blame them. Closing a loading popup discards late results.
+
+Inline blame is off by default. When enabled it follows the focused source line
+after CursorHold, clears when you move/edit, and discards stale asynchronous
+results. It annotates the end of the line without replacing source text.
+
+The local gitgud Lua plugin also works without Rediff: copy lua/gitgud/ into your
+Neovim config's lua/ directory and call require('gitgud').setup(). It is tested
+with the bundled Neovim 0.12 and Git 2.54; gh is needed only for PR lookups.
+Rediff supplies snapshot context through setup's context() callback: return
+{root,path,head,text,side?}, where path is repo-relative, head is a
+pinned commit SHA (empty for unborn HEAD), and text is the exact snapshot.
+Return nil to use normal file-buffer discovery. No Gitsigns dependency.
+
 STAGED compares HEAD/index; UNSTAGED compares index/worktree and includes untracked
 files. Badges: M modified, U untracked, R rename, A added, D deleted. Partially
 staged files appear in both groups. h/Left collapses a group (▸); l/Right or Enter
@@ -200,12 +236,18 @@ Aliases persist locally; connection subscriptions end when this editor exits.
 :harness open (alias :ho) opens the current worktree's harness.
 Its selected harness takes precedence; otherwise a single connected/editor-owned
 harness opens directly. Multiple local candidates with no default show a chooser.
+Without a session or configured provider, it asks which harness to start and saves
+that provider for the worktree. Cancelling starts nothing.
 Other worktrees are excluded. Opening a connected session selects it for annotations.
 An editor-owned TUI reuses its terminal split, process and buffer. An external live
 connection opens the connection/activity panel without offering another CLI.
 The bridge carries annotations and activity, not terminal screen or keyboard input.
 Use the external terminal to chat or interrupt work.
-With no available or selected session, open starts this worktree's selected CLI.
+After disconnecting, open rediscovers live sessions even after an editor restart
+or when opening a file instead of Review. With no live match, the Amp adapter
+checks saved history before starting fresh; other adapters retain their launch behavior.
+Saved connections are rechecked before opening the activity panel. After Amp exits
+(including Ctrl-C), open offers to resume the saved thread in a new TUI.
 The shared startup policy for every harness is: connect to a live session in this
 directory/worktree, otherwise resume the last recorded session, otherwise start
 fresh. Discovery, validation, and resume commands are provider-adapter concerns.
@@ -245,8 +287,10 @@ In Review, press Escape then type :w (or :write) from its harness pane to send
 the saved annotation batch, just as from the tree or diff panes. This shortcut
 applies only to the active Review's own worktree, not to ordinary terminals.
 
-The bridge cannot move an external TUI into Neovim. For a selected Amp or Claude
-session, :harness resume confirms before starting another TUI for the same session.
+The bridge cannot move an external TUI into Neovim. :harness resume first
+rediscovers the selected session: a live local match reconnects without launching
+a CLI, and a match in another worktree blocks launch. Without a live match, it
+confirms before starting a TUI for a saved Amp or Claude session.
 Open also offers this confirmation for saved sessions without a live bridge.
 Stop using the other terminal first. This does not create a new thread, attach to
 or kill its process, or send a prompt. OMP session resumption is not supported here.
@@ -391,6 +435,8 @@ Scripts use uppercase names below. Typed aliases: :harness = :Harness,
   :Explorer / :FocusDiff       Focus tree / diff or editor
   :Files / :Search             Fuzzy file / text search
   :Commands                   Find available commands
+  :GitGud blame[-line|-toggle] Full-file / current-line / inline blame
+  :GitGud pr                  Show links to this line's associated PRs
   :View [split|merged]         Choose layout; no argument toggles
   :Focus staged|unstaged      Select first file/hunk in that group
   :ReviewRefresh              Refresh snapshots and file list
@@ -450,7 +496,7 @@ Choose your receiver carefully.
 
 LIMITS                                                        *rediff-parity*
 Binary files, merge conflicts and files over 2 MiB are unsupported. Notes are
-not re-anchored automatically. File/hunk annotation scopes, LSP inspection, blame
+not re-anchored automatically. File/hunk annotation scopes, LSP inspection
 and collapsed/compact diffs are not implemented. See FEATURES.md for the inventory.
 
  vim:tw=78:ts=8:ft=help:norl:
