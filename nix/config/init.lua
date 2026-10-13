@@ -137,6 +137,26 @@ require("neo-tree").setup({
 		},
 	},
 })
+-- Git ref/index changes need not produce a watched worktree file event.
+-- Reconcile cached markers when returning from Review, another terminal, or
+-- an editor pane; Neo-tree refreshes in place and marks hidden trees dirty.
+vim.api.nvim_create_autocmd({ "FocusGained", "TabEnter", "BufEnter" }, {
+	callback = function(event)
+		if event.event == "BufEnter" and vim.bo[event.buf].filetype ~= "neo-tree" then
+			return
+		end
+		-- Let tab/window transitions finish before refreshing a visible explorer.
+		vim.schedule(function()
+			for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+				if vim.bo[vim.api.nvim_win_get_buf(win)].filetype == "neo-tree" then
+					local events = require("neo-tree.events")
+					events.fire_event(events.GIT_EVENT)
+					break
+				end
+			end
+		end)
+	end,
+})
 local function explorer_highlights()
 	vim.api.nvim_set_hl(0, "NeoTreeGitAdded", { fg = "#4ade80", bold = true })
 	vim.api.nvim_set_hl(0, "NeoTreeGitUntracked", { fg = "#4ade80", bold = true })
@@ -191,6 +211,7 @@ local review = require("rediff.review")
 vim.lsp.config("lua_ls", { settings = { Lua = { workspace = { checkThirdParty = false } } } })
 vim.lsp.enable({ "lua_ls", "nil_ls", "pyright", "ts_ls", "gopls", "rust_analyzer" })
 review.setup()
+require("rediff.annotations").setup()
 require("rediff.harness").setup()
 require("rediff.worktree").setup()
 require("rediff.cmdline").setup()

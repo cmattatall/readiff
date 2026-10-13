@@ -90,9 +90,13 @@ function M.lines(text)
 	return lines
 end
 
-function M.snapshot(root, entry)
+function M.snapshot(root, entry, buffer_text)
 	local old, new, patch
-	if entry.group == "untracked" then
+	if entry.group == "buffer" then
+		-- Full editor text, not a claim that the whole file is a Git addition.
+		new = buffer_text or worktree(root, entry.path):gsub("\r\n", "\n")
+		old, patch = new, ""
+	elseif entry.group == "untracked" then
 		old, new = "", worktree(root, entry.path)
 		patch = vim.diff(old, new, { result_type = "unified", ctxlen = 3 })
 	else
@@ -113,6 +117,14 @@ function M.snapshot(root, entry)
 		table.concat({ root, entry.group, entry.path, head, vim.fn.sha256(old), vim.fn.sha256(new), patch }, "\0")
 	)
 	return { id = id, path = entry.path, group = entry.group, head = head, old = old, new = new, patch = patch }
+end
+
+function M.buffer_snapshot(root, path, buf)
+	local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+	if vim.bo[buf].endofline then
+		text = text .. "\n"
+	end
+	return M.snapshot(root, { group = "buffer", path = path }, text)
 end
 
 function M.validate(root, snapshot)

@@ -60,6 +60,27 @@ Outside Git, startup stays in ordinary editing without a sidebar.
 Headless runs open neither Review nor the tree. Space r toggles Review.
 The bottom bar shows the branch (or detached @short-SHA), harness and delivery.
 
+ANNOTATING ORDINARY FILES
+
+Space a (or :AnnotationMode) toggles annotation mode for the current named file
+inside a Git checkout, including clean files and unsaved edits. The bottom bar
+shows ANNOTATE. While enabled, source text is protected and the same controls,
+note composer and harness delivery used by Review apply: i adds/edits a note;
+v/V/Ctrl-v then a annotates an exact selection; d deletes a note; @ lists notes.
+Space a again restores normal editing and any previous buffer-local mappings.
+Review always has annotation mode on; Space a does not turn it off there.
+
+:w in the note saves the note locally. :w in an ordinary file STILL saves that
+file, even in annotation mode. Use :WriteFeedback to send saved notes through
+the selected harness (:harness use amp, etc.). Without a harness, feedback is
+queued locally. Notes are shared with Review in this editor process.
+
+Notes retain the exact buffer text at annotation time, including unsaved edits.
+Later edits never move their anchors. Jumping to a note on another or older
+snapshot opens its protected Review view; it does not overwrite the file.
+If an external reload changes the buffer text, annotation mode turns off; use
+Space a again to annotate the new text. Notes/drafts remain in this process.
+
 Source panes are protected snapshots. Editing commands open a note instead of
 changing code. i edits the note under the cursor; overlapping notes open a picker.
 :annotations new always creates a separate note. For an exact range, select with
@@ -96,12 +117,13 @@ GIT AND REFRESH                                                    *rediff-git*
 gitgud provides one interface in ordinary files and Review source panes:
   Space g b / :GitGud blame-line   Show author, date and commit for this line
   Space g B / :GitGud blame        Browse blame for every source line
-  Space g i / :GitGud blame-toggle Toggle inline blame for the focused line
+  Space g i / :GitGud toggle       Toggle inline blame for the focused line
   Space g p / :GitGud pr           Show this line's associated PR links
 
 :gitgud is a typed alias for :GitGud. Tab completes subcommands. :GitGud without
-arguments opens full-file blame. In blame views, p shows the selected line's PRs;
-in full-file blame, Enter returns to that source line. q/Esc closes the view.
+arguments toggles inline blame, just like :GitGud toggle. :GitGud blame-toggle
+remains an alias. In blame views, p shows the selected line's PRs; in full-file
+blame, Enter returns to that source line. q/Esc closes the view.
 Full-file blame is read-only and keeps your editor/Review layout intact.
 
 The popup displays HTTPS links with terminal hyperlinks (OSC 8). Use your local

@@ -107,7 +107,7 @@ local function current(cached)
 	if vim.b.rediff_harness_root then
 		return M.get(vim.b.rediff_harness_root)
 	end
-	local review = require("rediff.review").active()
+	local review = require("rediff.review").active() or require("rediff.annotations").context()
 	if review then
 		return M.get(review.root)
 	end

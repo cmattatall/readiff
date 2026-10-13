@@ -336,12 +336,13 @@ function M.setup(opts)
 			M.blame_line(false)
 		end,
 		["blame-toggle"] = M.toggle_inline,
+		toggle = M.toggle_inline,
 		pr = function()
 			M.blame_line(true)
 		end,
 	}
 	api.nvim_create_user_command("GitGud", function(args)
-		local action = actions[args.args ~= "" and args.args or "blame"]
+		local action = actions[args.args ~= "" and args.args or "toggle"]
 		if not action then
 			return vim.notify("Unknown GitGud action; use Tab to complete", vim.log.levels.ERROR)
 		end

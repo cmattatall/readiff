@@ -78,12 +78,40 @@ function M.active()
 	return M.state and api.nvim_get_current_tabpage() == M.state.tab and M.state or nil
 end
 
+-- Annotation operations work on either a Review pane or a protected file buffer.
+local function annotation_state()
+	return assert(M.active() or require("rediff.annotations").context(), "Enable annotation mode with Space a first")
+end
+
+function M.notes(root)
+	if not reviews[root] then
+		reviews[root] = {
+			root = root,
+			directory = feedback.directory(root),
+			comments = {},
+			drafts = {},
+			snapshots = {},
+			harness = harness.get(root).target,
+		}
+	end
+	return reviews[root]
+end
+
+-- File views and Review retain the same collections across mode transitions.
+local function retain(items, predicate)
+	for i = #items, 1, -1 do
+		if not predicate(items[i]) then
+			table.remove(items, i)
+		end
+	end
+end
+
 local function entry_key(entry)
 	return entry.group .. "\0" .. entry.path
 end
 
-local function save()
-	local s = state()
+local function save(s)
+	s = s or annotation_state()
 	feedback.write(s.directory .. "/draft.json", {
 		harness = s.harness,
 	})
@@ -158,7 +186,7 @@ local function owned_buffer(name, lines, editable)
 			end
 			if editable then
 				M.save_composer()
-				local win = state().composer_win
+				local win = annotation_state().composer_win
 				-- Defer closing so :wq can finish without closing a source pane too.
 				vim.schedule(function()
 					if api.nvim_win_is_valid(win) and api.nvim_win_get_buf(win) == buf then
@@ -221,14 +249,14 @@ local function opposite_line(line, side, changes)
 end
 
 local function side_at_cursor()
-	local s = state()
+	local s = annotation_state()
 	local buf = api.nvim_get_current_buf()
 	assert(buf == s.old_buf or buf == s.new_buf, "Focus a source pane first")
 	return buf == s.old_buf and "old" or "new", buf
 end
 
 local function comments_at_cursor()
-	local s = state()
+	local s = annotation_state()
 	local side, line = side_at_cursor(), api.nvim_win_get_cursor(0)[1]
 	local matches = {}
 	for _, comment in ipairs(s.comments) do
@@ -262,14 +290,14 @@ local function render_tree_annotations(s)
 	end
 end
 
-local function render_comments(selection_only)
-	local s = state()
-	if not selection_only then
+local function render_comments(selection_only, s)
+	s = s or annotation_state()
+	if not selection_only and s.tree_buf then
 		render_tree_annotations(s)
 	end
 	local selected = {}
 	local buf = api.nvim_get_current_buf()
-	if M.active() == s and (buf == s.old_buf or buf == s.new_buf) then
+	if (M.active() == s or require("rediff.annotations").active() == s) and (buf == s.old_buf or buf == s.new_buf) then
 		for _, comment in ipairs(comments_at_cursor()) do
 			selected[comment.id] = true
 			if comment.id == s.annotation_id then
@@ -282,7 +310,7 @@ local function render_comments(selection_only)
 		return
 	end
 	s.cursor_comments = selected
-	for _, buf in ipairs({ s.old_buf, s.new_buf }) do
+	for _, buf in pairs({ s.old_buf, s.new_buf }) do
 		api.nvim_buf_clear_namespace(buf, annotation_ns, 0, -1)
 	end
 	if not s.current or not api.nvim_win_is_valid(s.new_win) then
@@ -328,6 +356,8 @@ local function render_comments(selection_only)
 	end
 	vim.cmd.redrawstatus()
 end
+
+M.render_comments = render_comments
 
 local function hunk_range(change, side, buf)
 	local range = change[side == "old" and "original" or "modified"]
@@ -433,15 +463,23 @@ function M.show(index, snapshot, keep_fold)
 	map_staging(s.new_buf)
 	local renderer = require("codediff.ui.view.render")
 	local path = " %<" .. vim.fn.strtrans(snapshot.path):gsub("%%", "%%%%")
+	local buffer_snapshot = snapshot.group == "buffer"
 	if s.layout == "merged" then
-		vim.wo[s.new_win].winbar = path .. " %= MERGED · red: old / green: new "
+		vim.wo[s.new_win].winbar = path
+			.. (buffer_snapshot and " %= BUFFER SNAPSHOT " or " %= MERGED · red: old / green: new ")
 		vim.wo[s.new_win].scrollbind = false
 		vim.wo[s.new_win].wrap = false
 		s.diff = assert(require("codediff.core.diff").compute_diff(old_lines, new_lines, renderer.diff_options()))
 		require("codediff.ui.inline").render_inline_diff(s.new_buf, s.diff, old_lines, new_lines, { filetype = ft })
 	else
-		vim.wo[s.old_win].winbar = path .. " %= OLD · " .. (snapshot.group == "staged" and "HEAD" or "INDEX") .. " "
-		vim.wo[s.new_win].winbar = path .. " %= NEW · " .. (snapshot.group == "staged" and "INDEX" or "WORKTREE") .. " "
+		vim.wo[s.old_win].winbar = path
+			.. " %= OLD · "
+			.. (buffer_snapshot and "BUFFER" or (snapshot.group == "staged" and "HEAD" or "INDEX"))
+			.. " "
+		vim.wo[s.new_win].winbar = path
+			.. " %= NEW · "
+			.. (buffer_snapshot and "BUFFER" or (snapshot.group == "staged" and "INDEX" or "WORKTREE"))
+			.. " "
 		s.diff = renderer.compute_and_render(
 			s.old_buf,
 			s.new_buf,
@@ -461,7 +499,7 @@ function M.show(index, snapshot, keep_fold)
 	end
 	vim.wo[s.new_win].wrap = wrap
 	require("rediff.difftastic").highlight(s, snapshot)
-	render_comments()
+	render_comments(false, s)
 	api.nvim_set_current_win(s.new_win)
 	mark_hunk(nil)
 	if #s.diff.changes > 0 then
@@ -508,7 +546,7 @@ function M.view(layout)
 	end
 	s.annotation_id = annotation_id
 	api.nvim_set_current_win(api.nvim_win_is_valid(focus) and focus or s.new_win)
-	render_comments()
+	render_comments(false, s)
 end
 
 local function read_changes(s, preferred)
@@ -642,7 +680,7 @@ function M.refresh(preferred, changes)
 	highlight_tree_selection(s)
 	render_tree_annotations(s)
 	awareness.scan(s.root)
-	save()
+	save(s)
 end
 
 function M.tree_fold(collapsed)
@@ -974,7 +1012,7 @@ function M.stage(whole_file, unstage)
 end
 
 function M.add_comment(anchor, text, existing_id)
-	local s = state()
+	local s = annotation_state()
 	assert(vim.trim(text) ~= "", "Comment cannot be empty")
 	if existing_id then
 		for _, comment in ipairs(s.comments) do
@@ -1006,7 +1044,7 @@ function M.add_comment(anchor, text, existing_id)
 end
 
 function M.save_composer()
-	local s = state()
+	local s = annotation_state()
 	if not s.draft then
 		return
 	end
@@ -1017,9 +1055,9 @@ function M.save_composer()
 		comment = M.add_comment(s.draft.anchor, text, s.draft.comment_id)
 		s.draft.comment_id = comment.id
 	end
-	s.drafts = vim.tbl_filter(function(draft)
+	retain(s.drafts, function(draft)
 		return draft ~= s.draft
-	end, s.drafts)
+	end)
 	s.draft.text, s.draft.saved = text, true
 	save()
 	if loaded then
@@ -1028,25 +1066,27 @@ function M.save_composer()
 	return comment
 end
 
-local function release_composer()
-	local s = state()
+local function release_composer(s)
+	s = s or annotation_state()
 	local buf = s.composer
 	if api.nvim_buf_is_loaded(buf) then
 		s.draft.text = table.concat(api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
 	end
 	for _, comment in ipairs(s.comments) do
 		if s.draft.comment_id == comment.id and s.draft.text == comment.text then
-			s.drafts = vim.tbl_filter(function(draft)
+			retain(s.drafts, function(draft)
 				return draft ~= s.draft
-			end, s.drafts)
+			end)
 			break
 		end
 	end
 	s.draft = nil
 	s.composer, s.composer_win = nil, nil
-	save()
+	save(s)
 	api.nvim_buf_delete(buf, { force = true })
 end
+
+M.release_composer = release_composer
 
 local function composer_config(s)
 	local anchor = s.draft.anchor
@@ -1086,7 +1126,8 @@ local function composer_config(s)
 end
 
 function M.compose(visual, keys, comment)
-	local s = state()
+	local s = annotation_state()
+	assert(not s.file_mode or s.enabled, "Enable annotation mode with Space a first")
 	if s.composer and api.nvim_win_is_valid(s.composer_win) then
 		api.nvim_set_current_win(s.composer_win)
 		if keys then
@@ -1101,6 +1142,7 @@ function M.compose(visual, keys, comment)
 	end
 	local side, buf = side_at_cursor()
 	assert(s.current, "No diff to annotate")
+	s.snapshots[s.current.id] = s.current
 	local line = api.nvim_win_get_cursor(0)[1]
 	local anchor = { file = s.current.path, side = side, snapshot_id = s.current.id }
 	if visual then
@@ -1137,10 +1179,48 @@ function M.compose(visual, keys, comment)
 	vim.wo[s.composer_win].wrap = true
 	vim.wo[s.composer_win].linebreak = true
 	vim.wo[s.composer_win].winhighlight = "FloatBorder:ReviewAnnotation,FloatTitle:ReviewAnnotation"
+	api.nvim_create_autocmd("QuitPre", {
+		buffer = composer,
+		callback = function()
+			-- Only explicit writes add/update comments; closing retains a draft.
+			vim.bo[composer].modified = false
+		end,
+	})
+	api.nvim_create_autocmd("WinClosed", {
+		pattern = tostring(s.composer_win),
+		once = true,
+		callback = function()
+			local refocus = api.nvim_get_current_win() == s.composer_win
+			vim.schedule(function()
+				if s.composer ~= composer then
+					return
+				end
+				local source = s.draft.anchor.side == "old" and s.old_win or s.new_win
+				release_composer(s)
+				if refocus and source and api.nvim_win_is_valid(source) then
+					api.nvim_set_current_win(source)
+				end
+			end)
+		end,
+	})
+	local resize = api.nvim_create_autocmd("VimResized", {
+		callback = function()
+			if s.composer == composer and api.nvim_win_is_valid(s.composer_win) then
+				api.nvim_win_set_config(s.composer_win, composer_config(s))
+			end
+		end,
+	})
+	api.nvim_create_autocmd("BufWipeout", {
+		buffer = composer,
+		once = true,
+		callback = function()
+			api.nvim_del_autocmd(resize)
+		end,
+	})
 	api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "BufLeave" }, {
 		buffer = composer,
 		callback = function()
-			if M.state == s and s.draft and s.composer then
+			if s.draft and s.composer then
 				s.draft.text = table.concat(api.nvim_buf_get_lines(composer, 0, -1, false), "\n")
 				s.draft.saved = not vim.bo[composer].modified
 			end
@@ -1169,7 +1249,7 @@ function M.clear_sent(root, path)
 			sent[comment.id] = comment
 		end
 	end
-	s.comments = vim.tbl_filter(function(comment)
+	retain(s.comments, function(comment)
 		if not vim.deep_equal(comment, sent[comment.id]) then
 			return true
 		end
@@ -1185,14 +1265,15 @@ function M.clear_sent(root, path)
 			s.annotation_id = nil
 		end
 		return false
-	end, s.comments)
+	end)
 	if M.state == s then
-		render_comments()
+		render_comments(false, s)
 	end
+	require("rediff.annotations").refresh()
 end
 
 function M.submit(retry)
-	local s = state()
+	local s = annotation_state()
 	if #s.comments == 0 then
 		notify("No agent notes to send to the harness")
 		return
@@ -1240,7 +1321,7 @@ function M.submit(retry)
 end
 
 function M.select_harness(name, session)
-	local s = state()
+	local s = annotation_state()
 	if not name then
 		notify("Harness: " .. s.harness.name .. (s.harness.session and (" · " .. s.harness.session) or ""))
 		return
@@ -1254,14 +1335,19 @@ function M.select_harness(name, session)
 end
 
 function M.archive()
-	local s = state()
+	local s = annotation_state()
 	assert(not s.composer, "Close the comment composer first")
 	feedback.write(s.directory .. "/archive-" .. tostring(vim.uv.hrtime()) .. ".json", {
 		comments = s.comments,
 		snapshots = s.snapshots,
 		drafts = s.drafts,
 	})
-	s.comments, s.snapshots, s.drafts, s.draft = {}, {}, {}, nil
+	for _, items in ipairs({ s.comments, s.snapshots, s.drafts }) do
+		for key in pairs(items) do
+			items[key] = nil
+		end
+	end
+	s.draft = nil
 	s.annotation_id = nil
 	if s.current then
 		s.snapshots[s.current.id] = s.current
@@ -1272,7 +1358,7 @@ function M.archive()
 end
 
 local function remove_comment(comment)
-	local s = state()
+	local s = annotation_state()
 	for i, item in ipairs(s.comments) do
 		if item.id == comment.id then
 			table.remove(s.comments, i)
@@ -1295,7 +1381,7 @@ local function remove_comment(comment)
 end
 
 function M.delete_comment()
-	local s = state()
+	local s = annotation_state()
 	local matches = comments_at_cursor()
 	if #matches == 0 then
 		notify("No annotation on this line")
@@ -1308,7 +1394,7 @@ function M.delete_comment()
 				return comment.text:gsub("\n", " ")
 			end,
 		}, function(comment)
-			if M.state == s and comment then
+			if annotation_state() == s and comment then
 				remove_comment(comment)
 			end
 		end)
@@ -1316,7 +1402,7 @@ function M.delete_comment()
 end
 
 local function pick_comments(comments, action)
-	local s = state()
+	local s = annotation_state()
 	if #comments == 0 then
 		notify("No annotations")
 		return
@@ -1341,7 +1427,7 @@ local function pick_comments(comments, action)
 		fzf_opts = { ["--delimiter"] = "\t", ["--with-nth"] = "2..", ["--no-multi"] = true },
 		actions = {
 			enter = guard(function(selected)
-				if M.state == s and selected[1] then
+				if annotation_state() == s and selected[1] then
 					local comment = comments[tonumber(selected[1]:match("^(%d+)\t"))]
 					if comment then
 						action(comment)
@@ -1353,21 +1439,30 @@ local function pick_comments(comments, action)
 end
 
 function M.jump_comment(comment)
-	local s = state()
+	local s = annotation_state()
 	assert(not s.composer, "Save or close the current annotation before jumping")
 	assert(vim.tbl_contains(s.comments, comment), "Annotation no longer exists")
 	local snapshot = assert(s.snapshots[comment.snapshot_id], "Missing annotation snapshot")
-	if comment.side == "old" and s.layout == "merged" then
+	if s.file_mode and (not s.enabled or snapshot.id ~= s.current.id) then
+		-- Older/other-file anchors use Review's immutable snapshot navigation.
+		M.open(s.root)
+		s = state()
+	end
+	if not s.file_mode and snapshot.group == "buffer" and comment.side == "new" then
+		M.view("merged")
+	elseif comment.side == "old" and s.layout == "merged" then
 		M.view("split")
 	end
 	local index
-	for i, entry in ipairs(s.entries) do
+	for i, entry in ipairs(s.entries or {}) do
 		if entry_key(entry) == entry_key(snapshot) then
 			index = i
 			break
 		end
 	end
-	M.show(index, snapshot)
+	if not s.file_mode then
+		M.show(index, snapshot)
+	end
 	s.annotation_id = comment.id
 	local win = comment.side == "old" and s.old_win or s.new_win
 	api.nvim_set_current_win(win)
@@ -1380,7 +1475,7 @@ function M.jump_comment(comment)
 end
 
 function M.edit_comment(comment)
-	local s = state()
+	local s = annotation_state()
 	if comment then
 		M.jump_comment(comment)
 		M.compose(false, "i", comment)
@@ -1407,11 +1502,11 @@ function M.edit_comment(comment)
 end
 
 function M.list_comments()
-	pick_comments(vim.list_slice(state().comments), M.jump_comment)
+	pick_comments(vim.list_slice(annotation_state().comments), M.jump_comment)
 end
 
 function M.next_comment(direction)
-	local s = state()
+	local s = annotation_state()
 	if #s.comments == 0 then
 		notify("No annotations")
 		return
@@ -1436,9 +1531,9 @@ function M.leave()
 	awareness.stop()
 	require("rediff.live").stop(s)
 	if s.composer then
-		release_composer()
+		release_composer(s)
 	end
-	save()
+	save(s)
 	M.state = nil
 	vim.uv.fs_unlink(s.directory .. "/editor.lock")
 	if api.nvim_tabpage_is_valid(s.tab) then
@@ -1460,12 +1555,13 @@ function M.leave()
 	api.nvim_exec_autocmds("User", { pattern = "ReviewLeave" })
 end
 
-function M.open()
+function M.open(root)
 	if M.state then
+		assert(not root or root == M.state.root, "Leave the other repository's Review first")
 		api.nvim_set_current_tabpage(M.state.tab)
 		return
 	end
-	local root = git.root()
+	root = root or git.root()
 	git.entries(root) -- Validate before changing windows.
 	local target = harness.get(root).target
 	local directory = feedback.directory(root)
@@ -1478,7 +1574,7 @@ function M.open()
 	local fd = assert(vim.uv.fs_open(lock, "wx", 384), "Review already open in another editor")
 	vim.uv.fs_write(fd, tostring(vim.uv.os_getpid()), 0)
 	vim.uv.fs_close(fd)
-	local pending = reviews[root] or {}
+	local pending = M.notes(root)
 	local s = {
 		root = root,
 		directory = directory,
@@ -1545,68 +1641,13 @@ function M.open()
 				require("rediff.navigation").definition()
 			end, "Find symbol definitions in current worktree")
 		end
-		for _, key in ipairs({
-			"i",
-			"a",
-			"o",
-			"O",
-			"I",
-			"A",
-			"c",
-			"C",
-			"r",
-			"R",
-			"D",
-			"x",
-			"X",
-			"p",
-			"P",
-			"u",
-			"<C-r>",
-			".",
-			"~",
-			">",
-			"<",
-			"=",
-			"J",
-			"gJ",
-			"gq",
-			"gw",
-			"gu",
-			"gU",
-			"g~",
-			"gp",
-			"gP",
-		}) do
-			map(buf, "n", key, function()
-				local prefix = '"' .. vim.v.register .. (vim.v.count > 0 and tostring(vim.v.count) or "")
-				if key == "i" then
-					M.edit_comment()
-				else
-					M.compose(false, prefix .. key)
-				end
-			end, "Comment instead of editing code")
-		end
-		map(buf, "n", "d", M.delete_comment, "Delete annotation on this line")
-		for _, key in ipairs({ "a", "i", "<leader>c" }) do
-			map(buf, "x", key, function()
-				M.compose(true)
-			end, "Comment on exact selection")
-		end
 	end
 	for _, buf in ipairs({ s.tree_buf, s.old_buf, s.new_buf }) do
+		require("rediff.annotations").bind(buf, buf ~= s.tree_buf)
 		map_hunks(buf)
 		map_staging(buf)
 		map(buf, "n", "<leader>R", M.refresh, "Refresh snapshot")
 		map(buf, "n", "<leader>q", M.leave, "Leave Review")
-		map(buf, "n", "@", M.list_comments, "Find/jump to annotations")
-		for key, direction in pairs({ ["}"] = 1, ["{"] = -1 }) do
-			map(buf, "n", key, function()
-				for _ = 1, vim.v.count1 do
-					M.next_comment(direction)
-				end
-			end, direction > 0 and "Next annotation" or "Previous annotation")
-		end
 		map(buf, "n", "<Tab>", function()
 			api.nvim_set_current_win(api.nvim_get_current_win() == s.tree_win and s.new_win or s.tree_win)
 		end, "Focus tree/diff")
@@ -1646,6 +1687,14 @@ function M.statusline()
 			.. file
 			.. (s.annotation_id and " · annotation snapshot · Space R to refresh" or "")
 			.. "%=%l:%c "
+	end
+	local file = require("rediff.annotations").active()
+	if file then
+		return " ANNOTATE · Space a to edit · "
+			.. #file.comments
+			.. " notes · "
+			.. harness.statusline(file.root)
+			.. " %<%f %m%=%l:%c %p%%"
 	end
 	return " EDIT · " .. vim.fn.mode():upper() .. " · " .. harness.statusline() .. " %<%f %m%=%l:%c %p%%"
 end
@@ -1695,7 +1744,7 @@ function M.setup()
 				s ~= nil and api.nvim_get_current_win() == s.tree_win and api.nvim_get_current_buf() == s.tree_buf
 			)
 			if s and s.diff then
-				render_comments(true)
+				render_comments(true, s)
 			end
 		end,
 	})
@@ -1807,7 +1856,7 @@ function M.setup()
 	api.nvim_create_user_command(
 		"Annotations",
 		guard(function(opts)
-			assert(M.active(), "Enter Review first")
+			assert(M.active() or require("rediff.annotations").active(), "Enable annotation mode with Space a first")
 			local actions = {
 				list = M.list_comments,
 				new = M.compose,
@@ -1899,20 +1948,12 @@ function M.setup()
 			{}
 		)
 	end
-	api.nvim_create_autocmd("QuitPre", {
-		callback = function()
-			if M.state and M.state.composer and api.nvim_buf_is_loaded(M.state.composer) then
-				-- Keep edits in the session draft. Only explicit writes add or update comments.
-				vim.bo[M.state.composer].modified = false
-			end
-		end,
-	})
 	api.nvim_create_autocmd("VimLeavePre", {
 		callback = function()
 			if M.state then
 				require("rediff.live").stop(M.state)
 				M.state.draft = nil
-				save()
+				save(M.state)
 				vim.uv.fs_unlink(M.state.directory .. "/editor.lock")
 			end
 		end,
@@ -1925,21 +1966,11 @@ function M.setup()
 		end,
 	})
 	api.nvim_create_autocmd("WinClosed", {
-		callback = function(event)
-			local refocus = M.state
-				and tonumber(event.match) == M.state.composer_win
-				and api.nvim_get_current_win() == M.state.composer_win
+		callback = function()
 			vim.schedule(function()
 				local s = M.state
 				if not s then
 					return
-				end
-				if s.composer and not api.nvim_win_is_valid(s.composer_win) then
-					local source = s.draft.anchor.side == "old" and s.old_win or s.new_win
-					release_composer()
-					if refocus and M.active() == s and source and api.nvim_win_is_valid(source) then
-						api.nvim_set_current_win(source)
-					end
 				end
 				if
 					(s.old_win and not api.nvim_win_is_valid(s.old_win))
@@ -1962,10 +1993,7 @@ function M.setup()
 					local width = api.nvim_win_get_width(s.old_win) + api.nvim_win_get_width(s.new_win)
 					api.nvim_win_set_width(s.old_win, math.floor(width / 2))
 				end
-				render_comments()
-				if s.composer and api.nvim_win_is_valid(s.composer_win) then
-					api.nvim_win_set_config(s.composer_win, composer_config(s))
-				end
+				render_comments(false, s)
 			end
 		end,
 	})

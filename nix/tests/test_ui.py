@@ -1355,7 +1355,7 @@ class EditorUI(unittest.TestCase):
         self.assertEqual(0, editor.funcs.exists(":Gitsigns"))
         self.assertEqual(0, editor.funcs.exists(":GitBlame"))
         self.assertEqual(
-            ["blame", "blame-line", "blame-toggle", "pr"],
+            ["blame", "blame-line", "blame-toggle", "pr", "toggle"],
             editor.funcs.getcompletion("GitGud ", "cmdline"),
         )
         self.assertEqual("", editor.funcs.maparg("<Space>gP", "n"))
@@ -1413,7 +1413,11 @@ class EditorUI(unittest.TestCase):
             end
             return table.concat(text, ' ')
         end)()"""
-        self.keys(editor, ":gitgud blame-toggle<CR>")
+        self.keys(editor, ":gitgud<CR>")
+        self.wait_for(editor, visible + ":find('Review Test',1,true) ~= nil")
+        editor.command("GitGud")
+        self.assertEqual("", self.lua(editor, "return " + visible))
+        editor.command("GitGud toggle")
         self.wait_for(editor, visible + ":find('Review Test',1,true) ~= nil")
         self.keys(editor, "4j")
         editor.command("doautocmd CursorHold")
@@ -1434,14 +1438,15 @@ class EditorUI(unittest.TestCase):
         )
         editor.current.window.cursor = (5, 0)
         pump(editor)
-        editor.command("GitGud blame-toggle")
+        editor.command("GitGud")
         self.wait_for(editor, visible + ":find('Review Test',1,true) ~= nil")
         self.lua(editor, "vim.api.nvim_set_current_win(s.new_win)")
         editor.current.window.cursor = (5, 0)
         pump(editor)
         editor.command("doautocmd CursorHold")
         self.wait_for(editor, visible + ":find('Not committed yet',1,true) ~= nil")
-        editor.command("GitGud blame-toggle")
+        editor.command("GitGud")
+        self.assertEqual("", self.lua(editor, "return " + visible))
         # Hold one real Git response until after focus and line have changed.
         editor.exec_lua("""
             local system = vim.system
@@ -2018,6 +2023,142 @@ class EditorUI(unittest.TestCase):
         self.lua(editor, "r.archive()")
         self.keys(editor, "i<Esc>")
         self.assertEqual([""], list(editor.current.buffer[:]))
+
+    def test_file_annotation_mode_preserves_editing_and_sends_original_context(self):
+        path = Path(self.root, "auth.lua")
+        original = path.read_text()
+        index = subprocess.check_output(["git", "-C", self.root, "write-tree"])
+        editor = self.launch(self.root, file="auth.lua")
+        source = editor.current.buffer
+        self.keys(editor, "ggI-- unsaved prefix <Esc>")
+        annotated = "-- unsaved prefix " + original
+        self.assertEqual(annotated, "\n".join(source[:]) + "\n")
+        # A user's buffer-local mapping must survive both mode transitions.
+        editor.exec_lua(
+            "vim.keymap.set('n','x',function() vim.g.restored_map=true end,{buffer=0})"
+        )
+        self.keys(editor, " a")
+        self.assertIn("ANNOTATE", self.lua(editor, "return r.statusline()"))
+        self.assertFalse(source.options["modifiable"])
+        self.assertIsNone(self.lua(editor, "return r.active()"))
+        editor.current.window.cursor = [1, 3]
+        self.keys(editor, "v5laCheck this exact prefix<Esc>:w<CR>")
+        self.assertEqual(source.number, editor.current.buffer.number)
+        self.assertEqual(original, path.read_text())
+        self.assertTrue(source.options["modified"])
+        self.keys(editor, ":WriteFeedback<CR>")
+        payload = editor.exec_lua(
+            "local s=require('rediff.annotations').context(); return require('rediff.feedback').read(s.last_submission)"
+        )
+        note = payload["comments"][0]
+        self.assertEqual("Check this exact prefix", note["text"])
+        self.assertEqual(["unsave"], note["selection"]["text"])
+        self.assertEqual("character", note["selection"]["kind"])
+        self.assertEqual(
+            ("auth.lua", "new", 1, 1),
+            (note["file"], note["side"], note["line"], note["line_end"]),
+        )
+        snapshot = payload["snapshots"][note["snapshot_id"]]
+        self.assertEqual("buffer", snapshot["group"])
+        self.assertEqual(annotated, snapshot["new"])
+        self.assertEqual("changed", payload["snapshot_status"][snapshot["id"]])
+        # :w in a normal source remains a file write, not feedback delivery.
+        self.keys(editor, ":w<CR>")
+        self.assertEqual(annotated, path.read_text())
+        self.assertFalse(source.options["modified"])
+        # Deletion and draft handling use the same controls as Review.
+        self.keys(editor, "diUnsent draft<Esc><Esc>")
+        self.assertEqual(source.number, editor.current.buffer.number)
+        self.keys(editor, "i<Esc>")
+        self.assertEqual(["Unsent draft"], editor.current.buffer[:])
+        self.keys(editor, ":w<CR>")
+        self.assertEqual(source.number, editor.current.buffer.number)
+        self.keys(editor, " a")
+        self.assertTrue(source.options["modifiable"])
+        self.keys(editor, "x")
+        self.assertTrue(editor.exec_lua("return vim.g.restored_map"))
+        self.keys(editor, "ggI-- later edit <Esc>")
+        self.assertEqual("-- later edit " + annotated, "\n".join(source[:]) + "\n")
+        # Notes keep their exact original snapshot after ordinary editing.
+        self.keys(editor, ":WriteFeedback<CR>")
+        later = editor.exec_lua(
+            "local s=require('rediff.annotations').context(); return require('rediff.feedback').read(s.last_submission)"
+        )
+        self.assertEqual(
+            annotated, later["snapshots"][later["comments"][0]["snapshot_id"]]["new"]
+        )
+        self.assertEqual(
+            index, subprocess.check_output(["git", "-C", self.root, "write-tree"])
+        )
+
+    def test_file_notes_are_shared_with_always_on_review_annotations(self):
+        subprocess.run(["git", "-C", self.root, "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", self.root, "commit", "-m", "Clean fixture"],
+            check=True,
+            capture_output=True,
+        )
+        editor = self.launch(self.root, file="auth.lua")
+        source = editor.current.buffer
+        self.keys(editor, " a3GiFile note<Esc>:w<CR>")
+        self.assertEqual(source.number, editor.current.buffer.number)
+        self.keys(editor, " r")
+        self.assertEqual(0, self.lua(editor, "return #s.entries"))
+        # Navigation still reaches notes on clean files, using original text.
+        self.keys(editor, "}")
+        self.assertEqual("auth.lua", self.lua(editor, "return s.current.path"))
+        self.assertEqual([3, 0], list(editor.current.window.cursor))
+        self.keys(editor, " ai<Esc>A revised<Esc>:w<CR>")
+        self.assertEqual(
+            "File note revised", self.lua(editor, "return s.comments[1].text")
+        )
+        self.assertFalse(editor.current.buffer.options["modifiable"])
+        self.keys(editor, " r")
+        self.assertEqual(source.number, editor.current.buffer.number)
+        self.keys(editor, "i<Esc>")
+        self.assertEqual(["File note revised"], editor.current.buffer[:])
+        self.keys(editor, ":q<CR>:WriteFeedback<CR>")
+        payload = editor.exec_lua(
+            "local s=require('rediff.annotations').context(); return require('rediff.feedback').read(s.last_submission)"
+        )
+        self.assertEqual("File note revised", payload["comments"][0]["text"])
+        self.assertEqual("current", next(iter(payload["snapshot_status"].values())))
+        # Deliver through a real child receiver, while editing the same note.
+        editor.exec_lua(
+            "local receiver=...; require('rediff.feedback').settings=function() "
+            "return {feedback_command={vim.v.progpath,'--headless','-u','NONE','-l',receiver,'wait'}} end; "
+            "require('rediff.review').select_harness('custom')",
+            str(Path(FIXTURE).with_name("receiver.lua")),
+        )
+        self.keys(editor, ":WriteFeedback<CR>")
+        submission = editor.exec_lua(
+            "return require('rediff.annotations').context().last_submission"
+        )
+        try:
+            self.keys(editor, "i<Esc>A after send<Esc>")
+        finally:
+            Path(submission + ".release").touch()
+        self.wait_for(
+            editor,
+            "not require('rediff.feedback').busy(require('rediff.annotations').context().root)",
+        )
+        self.assertEqual(
+            "completed",
+            json.loads(Path(submission.replace(".json", ".status.json")).read_text())[
+                "status"
+            ],
+        )
+        self.keys(editor, ":w<CR>")
+        self.assertEqual(source.number, editor.current.buffer.number)
+        self.keys(editor, "i<Esc>")
+        self.assertEqual(["File note revised after send"], editor.current.buffer[:])
+        self.keys(editor, ":q<CR>")
+        self.keys(editor, ":bdelete<CR>")
+        editor.command("edit auth.lua")
+        pump(editor)
+        self.assertTrue(editor.current.buffer.options["modifiable"])
+        self.keys(editor, "ggI-- ordinary editing again<Esc>")
+        self.assertTrue(editor.current.buffer[0].startswith("-- ordinary editing again"))
 
     def test_visual_a_preserves_annotation_ranges_through_submission(self):
         editor = self.launch(self.root)
@@ -2949,6 +3090,72 @@ class EditorUI(unittest.TestCase):
         self.assertEqual(terminal, editor.current.window.handle)
         self.assertEqual("t", editor.api.get_mode()["mode"])
         self.assertNotIn("tracked.txt", "\n".join(editor.buffers[tree][:]))
+
+    def test_explorer_git_markers_recover_after_external_ref_updates(self):
+        def git(*args):
+            return subprocess.check_output(
+                ["git", "-C", self.root, *args], text=True
+            ).strip()
+
+        # Prepare a commit without moving HEAD or rewriting working-tree files.
+        # Advancing the ref later only changes nested .git/refs and .git/logs,
+        # beyond Neo-tree's non-recursive metadata watcher.
+        git("add", ".")
+        branch, old = git("symbolic-ref", "HEAD"), git("rev-parse", "HEAD")
+        new = git(
+            "commit-tree", git("write-tree"), "-p", old, "-m", "External ref update"
+        )
+        editor = self.launch(self.root, file="auth.lua")
+        source = editor.current.buffer
+        source[0] = "-- unsaved local edit"
+        self.keys(editor, " e")
+        self.wait_for(editor, "vim.bo.filetype == 'neo-tree'")
+        tree = editor.current.buffer.number
+        editor.exec_lua(
+            """
+            local tree = ...
+            function _G.has_marker(name, marker)
+                for _,line in ipairs(vim.api.nvim_buf_get_lines(tree,0,-1,false)) do
+                    if line:find(name,1,true) then
+                        return (line .. ' '):match('%s' .. marker .. '%s') ~= nil
+                    end
+                end
+                return false
+            end
+            """,
+            tree,
+        )
+        dirty = "has_marker('auth.lua','M') and has_marker('plan.md','A')"
+        clean = "not has_marker('auth.lua','M') and not has_marker('plan.md','A')"
+        self.wait_for(editor, dirty)
+        self.keys(editor, " r")
+        self.assertEqual(self.root, self.lua(editor, "return s.root"))
+        # Let startup's queued async status scans finish before changing the ref.
+        time.sleep(3)
+        pump(editor)
+        git("update-ref", branch, new)
+        self.wait_for(editor, "#s.entries == 0")
+        self.assertEqual("", git("status", "--porcelain"))
+        self.keys(editor, " r")
+        self.wait_for(editor, clean)
+        self.assertEqual(tree, editor.current.buffer.number)
+
+        # Terminal focus changes must recover missed metadata events too, in
+        # both directions: do not merely clear every marker on focus.
+        win, cursor = editor.current.window.handle, editor.current.window.cursor
+        for revision, condition in ((old, dirty), (new, clean)):
+            time.sleep(2)
+            pump(editor)
+            git("update-ref", branch, revision)
+            editor.command("doautocmd FocusGained")
+            self.wait_for(editor, condition)
+            self.assertEqual(win, editor.current.window.handle)
+            self.assertEqual(cursor, editor.current.window.cursor)
+            self.assertIn("auth.lua", "\n".join(editor.buffers[tree][:]))
+            self.assertIn("plan.md", "\n".join(editor.buffers[tree][:]))
+            self.assertIn("[+]", "\n".join(editor.buffers[tree][:]))
+            self.assertEqual("-- unsaved local edit", source[0])
+            self.assertTrue(source.options["modified"])
 
     def test_leaving_startup_review_can_explore_worktree_subdirectories(self):
         worktree = Path(self.directory.name, "linked-worktree")
