@@ -302,58 +302,66 @@ function M.discover(callback)
 			done(err)
 		end
 	end
-	local ok, err = pcall(vim.system, { "rediff-live", "discover", "--all" }, { text = true }, function(result)
-		vim.schedule(function()
-			if closed then
-				return
-			end
-			if result.code ~= 0 then
-				local message = vim.trim(result.stderr or "")
-				finish(message ~= "" and message or "Harness discovery failed")
-				return
-			end
-			local decoded, rows = pcall(vim.json.decode, result.stdout or "")
-			if not decoded or type(rows) ~= "table" or not vim.islist(rows) then
-				finish("Harness discovery returned invalid data")
-				return
-			end
-			local seen = {}
-			for _, row in ipairs(rows) do
-				if
-					type(row) == "table"
-					and (row.provider == "amp" or row.provider == "omp")
-					and type(row.root) == "string"
-					and row.root ~= ""
-					and type(row.session) == "string"
-					and row.session ~= ""
-					and type(row.connection) == "string"
-					and row.connection ~= ""
-				then
-					row = vim.deepcopy(row)
-					row.name = row.provider .. "-live"
-					local entry = merge(row)
-					entry.online = true
-					seen[entry.key] = true
-					if entry.connected then
-						start(entry)
+	local ok, err = pcall(
+		vim.system,
+		{ "rediff-live", "discover", "--all" },
+		{ text = true, timeout = 5000 },
+		function(result)
+			vim.schedule(function()
+				if closed then
+					return
+				end
+				if result.code ~= 0 then
+					local message = vim.trim(result.stderr or "")
+					finish(
+						result.code == 124 and "Harness discovery timed out after 5 seconds"
+							or (message ~= "" and message or "Harness discovery failed")
+					)
+					return
+				end
+				local decoded, rows = pcall(vim.json.decode, result.stdout or "")
+				if not decoded or type(rows) ~= "table" or not vim.islist(rows) then
+					finish("Harness discovery returned invalid data")
+					return
+				end
+				local seen = {}
+				for _, row in ipairs(rows) do
+					if
+						type(row) == "table"
+						and (row.provider == "amp" or row.provider == "omp")
+						and type(row.root) == "string"
+						and row.root ~= ""
+						and type(row.session) == "string"
+						and row.session ~= ""
+						and type(row.connection) == "string"
+						and row.connection ~= ""
+					then
+						row = vim.deepcopy(row)
+						row.name = row.provider .. "-live"
+						local entry = merge(row)
+						entry.online = true
+						seen[entry.key] = true
+						if entry.connected then
+							start(entry)
+						end
 					end
 				end
-			end
-			for key, entry in pairs(entries) do
-				if feedback.is_live(entry) and not seen[key] then
-					stop(key)
-					if entry.connected then
-						entry.online = false
-						entry.activity = { state = "unknown" }
-					else
-						entries[key] = nil
+				for key, entry in pairs(entries) do
+					if feedback.is_live(entry) and not seen[key] then
+						stop(key)
+						if entry.connected then
+							entry.online = false
+							entry.activity = { state = "unknown" }
+						else
+							entries[key] = nil
+						end
 					end
 				end
-			end
-			changed()
-			finish(nil)
-		end)
-	end)
+				changed()
+				finish(nil)
+			end)
+		end
+	)
 	if not ok then
 		vim.schedule(function()
 			if not closed then

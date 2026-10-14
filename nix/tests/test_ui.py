@@ -2648,6 +2648,111 @@ class EditorUI(unittest.TestCase):
                 shows, self.lua(editor, "return vim.g.annotation_show_count")
             )
 
+    def test_harness_open_blocks_input_times_out_and_allows_retry(self):
+        binary = Path(self.directory.name, "bin")
+        binary.mkdir()
+        cli = binary / "amp"
+        log = Path(self.directory.name, "open-launches")
+        cli.write_text(
+            f"#!{sys.executable}\n"
+            "import os\n"
+            "with open(os.environ['HARNESS_TEST_LOG'], 'a') as log: log.write('launch\\n')\n"
+            "while True: print('received:' + input(), flush=True)\n"
+        )
+        cli.chmod(0o755)
+        os.environ["PATH"] = str(binary) + os.pathsep + os.environ["PATH"]
+        os.environ["HARNESS_TEST_LOG"] = str(log)
+        editor = self.launch(self.root, file="auth.lua")
+        self.lua(
+            editor,
+            """
+            require('rediff.harness').use('amp')
+            local system = vim.system
+            _G.discovery_results, _G.startup_results = {}, {}
+            vim.system = function(argv, opts, callback)
+                if argv[1] == 'rediff-live' and argv[2] == 'discover' then
+                    table.insert(discovery_results, callback)
+                    return {}
+                elseif argv[1] == 'rediff-amp-live' and argv[2] == 'startup' then
+                    table.insert(startup_results, callback)
+                    return {}
+                end
+                return system(argv, opts, callback)
+            end
+            _G.loading_text = function()
+                for _, win in ipairs(vim.api.nvim_list_wins()) do
+                    local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win),0,-1,false)
+                    if (lines[1] or ''):find('Opening harness',1,true) then
+                        return table.concat(lines,'\\n')
+                    end
+                end
+            end
+        """,
+        )
+        original = editor.current.buffer[:]
+        started = time.monotonic()
+        self.keys(editor, ":Harness open<CR>")
+        self.wait_for(editor, "loading_text() ~= nil")
+        frame = self.lua(editor, "return loading_text()")
+        self.wait_for(
+            editor, f"loading_text() ~= {json.dumps(frame, ensure_ascii=False)}"
+        )
+        self.keys(editor, ":Harness open<CR>:let g:leaked=1<CR>iunwanted<Esc>")
+        editor.command(
+            "Harness open"
+        )  # Even programmatic duplicate commands are ignored.
+        self.assertEqual("n", editor.api.get_mode()["mode"])
+        self.assertEqual(original, editor.current.buffer[:])
+        self.assertFalse(self.lua(editor, "return vim.g.leaked ~= nil"))
+        self.wait_for(editor, "loading_text() == nil")
+        self.assertGreaterEqual(time.monotonic() - started, 4.8)
+        self.assertLess(time.monotonic() - started, 6.5)
+        self.assertIn("timed out after 5 seconds", editor.vars["startup_notice"])
+        self.keys(editor, ":let g:unlocked=1<CR>")
+        self.assertEqual(1, editor.vars["unlocked"])
+        # Release the old discovery before retrying: timeout alone must cancel it.
+        self.lua(editor, "discovery_results[1]({code=0,stdout='[]'})")
+        pump(editor)
+        self.assertFalse(log.exists())
+        self.assertIsNone(self.lua(editor, "return loading_text()"))
+
+        # Fail during the second async phase; the overlay must disappear immediately.
+        self.keys(editor, ":ho<CR>")
+        self.lua(editor, "discovery_results[2]({code=0,stdout='[]'})")
+        self.wait_for(editor, "#startup_results == 1")
+        self.lua(
+            editor, "startup_results[1]({code=1,stderr='fixture startup failure'})"
+        )
+        self.wait_for(editor, "loading_text() == nil")
+        self.assertIn("fixture startup failure", editor.vars["startup_notice"])
+
+        # Timeout must also reject a late successful startup decision.
+        self.keys(editor, ":ho<CR>")
+        self.lua(editor, "discovery_results[3]({code=0,stdout='[]'})")
+        self.wait_for(editor, "#startup_results == 2")
+        self.wait_for(editor, "loading_text() == nil")
+        self.lua(
+            editor,
+            "startup_results[2]({code=0,stdout=vim.json.encode({action='new'})})",
+        )
+        pump(editor)
+        self.assertFalse(log.exists())
+
+        self.keys(editor, ":ho<CR>")
+        self.lua(editor, "discovery_results[4]({code=0,stdout='[]'})")
+        self.wait_for(editor, "#startup_results == 3")
+        self.lua(
+            editor,
+            "startup_results[3]({code=0,stdout=vim.json.encode({action='new'})})",
+        )
+        self.wait_for(editor, "vim.bo.buftype == 'terminal' and loading_text() == nil")
+        self.keys(editor, "hello<CR>")
+        self.wait_for(
+            editor,
+            "table.concat(vim.api.nvim_buf_get_lines(0,0,-1,false),'\\n'):find('received:hello',1,true) ~= nil",
+        )
+        self.assertEqual(["launch"], log.read_text().splitlines())
+
     def test_harness_open_without_configuration_and_after_amp_exit(self):
         binary = Path(self.directory.name, "bin")
         binary.mkdir()
