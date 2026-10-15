@@ -88,6 +88,13 @@ function M.bind(buf, source)
 			end, "Comment on exact selection")
 		end
 	end
+	if source and views[buf] then
+		map("n", "<Esc>", function()
+			if not views[buf].composer then
+				M.toggle()
+			end
+		end, "Leave file annotation mode when no note is open")
+	end
 	map("n", "@", review.list_comments, "Find/jump to annotations")
 	for key, direction in pairs({ ["}"] = 1, ["{"] = -1 }) do
 		map("n", key, function()

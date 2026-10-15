@@ -48,6 +48,7 @@ let
     vimPlugins.neo-tree-nvim
     vimPlugins.fzf-lua
     vimPlugins.nvim-lspconfig
+    vimPlugins.gitsigns-nvim
     vimPlugins.plenary-nvim
     vimPlugins.nvim-web-devicons
     vimPlugins.rose-pine

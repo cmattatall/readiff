@@ -142,11 +142,12 @@ function M.deliver(root, id, path, argv, retry, callback)
 		callback(status)
 		return
 	end
-	assert(
-		status.status ~= "running" or retry,
-		"Previous delivery is uncertain. Check the agent, then use :ReviewRetry explicitly."
-	)
-	assert(status.status ~= "failed" or retry, "Delivery failed. Check the agent before :ReviewRetry.")
+	if not retry and (status.status == "failed" or status.status == "running") then
+		-- A repeated write observes the saved outcome; only explicit retry sends
+		-- again. Expected transport failures are not editor exceptions.
+		callback(vim.tbl_extend("force", status, { status = status.status == "running" and "uncertain" or "failed" }))
+		return
+	end
 	if #argv == 0 then
 		callback(status)
 		return

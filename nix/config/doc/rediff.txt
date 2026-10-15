@@ -67,7 +67,9 @@ inside a Git checkout, including clean files and unsaved edits. The bottom bar
 shows ANNOTATE. While enabled, source text is protected and the same controls,
 note composer and harness delivery used by Review apply: i adds/edits a note;
 v/V/Ctrl-v then a annotates an exact selection; d deletes a note; @ lists notes.
-Space a again restores normal editing and any previous buffer-local mappings.
+Esc in the source (Normal mode), or Space a again, restores normal editing and
+any previous buffer-local mappings when no note editor is open. Esc never closes
+an open note or exits annotation mode while that note is open.
 Review always has annotation mode on; Space a does not turn it off there.
 
 :w in the note saves the note locally. :w in an ordinary file STILL saves that
@@ -89,9 +91,9 @@ and character/block columns, not just the cursor line.
 
 The note editor floats below the selected range without resizing the diff panes.
 Notes use normal Neovim editing. Esc while typing returns to Normal mode.
-Press Esc again to close the panel and retain its draft in this editor session.
+Further Escape presses leave the note open. Use :q to close and retain its draft.
   :w / :wq        Save locally and close
-  Esc / :q / :q!  Close and keep the draft
+  :q / :q!        Close and keep the draft
 Reopen the same line/range to resume its draft.
 
 Saved notes appear as orange text under their source range. Orange >> in the gutter
@@ -105,6 +107,12 @@ Both rows are marked if the file appears in STAGED and UNSTAGED. The dot include
 notes on older snapshots and disappears when the file's last note is deleted,
 archived, or cleared after successful delivery.
 
+A violet ◆ (changed since annotated) marks notes whose annotated lines changed
+on their selected side. Edits elsewhere, including line-number shifts, do not
+mark notes or trigger the submission warning. Insertions inside a selected range
+count as changes. The note border stays orange; restoring the source clears the
+badge. Checks also run while a note is open, without changing its text or anchor.
+
 Jumping to an older note shows its original snapshot and pauses refresh/staging.
 Space R returns to current files. Old-side notes switch merged view to split.
 Editing a note preserves its anchor. :w in diff/tree sends the saved notes.
@@ -113,6 +121,11 @@ See |rediff-drafts| for retention and retry.
 
 ==============================================================================
 GIT AND REFRESH                                                    *rediff-git*
+
+Ordinary files show Gitsigns gutter marks against Git's index, including unsaved
+edits: green for additions, yellow for modifications, and red for deletions.
+Untracked files get green dashed marks. Review snapshots keep their own diff
+rendering; Gitsigns does not attach to them. GitGud remains the blame provider.
 
 gitgud provides one interface in ordinary files and Review source panes:
   Space g b / :GitGud blame-line   Show author, date and commit for this line
@@ -139,9 +152,10 @@ editing includes unsaved buffer contents. New/uncommitted lines have no commit
 or PR. Merged-view red deletions are virtual lines: switch to split view and use
 the OLD pane to blame them. Closing a loading popup discards late results.
 
-Inline blame is off by default. When enabled it follows the focused source line
-after CursorHold, clears when you move/edit, and discards stale asynchronous
-results. It annotates the end of the line without replacing source text.
+Inline blame is on by default. Use Space g i or :GitGud to toggle it. It follows
+the focused source line after CursorHold, clears when you move/edit, and discards
+stale asynchronous results. It annotates the end of the line without replacing
+source text.
 
 The local gitgud Lua plugin also works without Rediff: copy lua/gitgud/ into your
 Neovim config's lua/ directory and call require('gitgud').setup(). It is tested
@@ -511,6 +525,10 @@ Keep the editor running during delivery. "accepted" means queued; "completed"
 means the turn finished, not that its changes are correct. Inspect the session
 and receipt before retrying uncertain delivery. Retries use the original payload.
 Without a binding, submissions stay local. Credentials never belong in Nix/Git.
+
+After a failure, :w keeps the notes without resending or raising a Lua error.
+:Harness status shows the saved failure reason and recovery advice. Check the
+agent before :ReviewRetry; a closed connection requires :harness connect amp/omp.
 
 Built-in harnesses receive JSON: rules once, then context and annotations.
 There is no prose prefix or epilogue. Explicit Git/PR authorization in your

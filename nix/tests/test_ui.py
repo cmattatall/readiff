@@ -794,6 +794,85 @@ class EditorUI(unittest.TestCase):
         )
         self.assertEqual(0, self.lua(editor, "return #s.comments"))
 
+    def test_failed_feedback_keeps_notes_without_blocking_or_automatic_retry(self):
+        editor = self.launch(self.root, columns=80)
+        self.lua(
+            editor,
+            r"""
+            require('rediff.live').stop(s)
+            local feedback = require('rediff.feedback')
+            feedback.settings = function() return {feedback_command={'fixture-receiver'}} end
+            r.select_harness('custom')
+            vim.api.nvim_set_current_win(s.new_win)
+            r.add_comment({file=s.current.path,side='new',snapshot_id=s.current.id,
+                selection=require('rediff.selection').line(s.new_buf,5)},'Keep this note until acknowledged')
+            _G.deliveries = {}
+            local system = vim.system
+            vim.system = function(argv,opts,callback)
+                if argv[1] ~= 'fixture-receiver' then return system(argv,opts,callback) end
+                local payload = feedback.read(argv[#argv])
+                table.insert(_G.deliveries,payload)
+                if #_G.deliveries == 1 then
+                    callback({code=1,stdout='',stderr=('Long receiver failure diagnostic\n'):rep(8)})
+                else
+                    callback({code=0,stderr='',stdout=vim.json.encode({submission_id=payload.submission_id,status='accepted'})})
+                end
+            end
+            -- Exercise Neovim's real messages, not the launch fixture's stub.
+            vim.notify = _G.original_notify
+        """,
+        )
+        self.keys(editor, ":w<CR>")
+        self.wait_for(editor, "s.delivery == 'failed'")
+        self.assertFalse(editor.api.get_mode()["blocking"])
+        self.assertEqual(1, self.lua(editor, "return #s.comments"))
+        path = self.lua(editor, "return s.last_submission")
+        payload = Path(path).read_text()
+        error = self.lua(
+            editor,
+            "return require('rediff.feedback').read(s.last_submission:gsub('%.json$','.status.json')).error",
+        )
+        self.assertIn("Long receiver failure diagnostic\n", error)
+        self.keys(editor, ":w<CR>")
+        self.assertFalse(editor.api.get_mode()["blocking"])
+        self.assertEqual(1, self.lua(editor, "return #_G.deliveries"))
+        self.assertEqual(payload, Path(path).read_text())
+        messages = editor.api.exec2("messages", {"output": True})["output"]
+        self.assertIn("notes kept", messages)
+        self.assertNotIn("feedback.lua:", messages)
+        self.lua(
+            editor, "vim.notify=function(message) vim.g.delivery_details=message end"
+        )
+        self.keys(editor, ":Harness status<CR>")
+        self.assertIn(error.strip(), editor.vars["delivery_details"])
+        self.assertIn(":ReviewRetry", editor.vars["delivery_details"])
+        self.lua(editor, "vim.notify=_G.original_notify")
+        self.keys(editor, ":ReviewRetry<CR>")
+        self.wait_for(
+            editor, "require('rediff.harness').get(s.root).delivery == 'accepted'"
+        )
+        self.assertEqual(0, self.lua(editor, "return #s.comments"))
+        deliveries = self.lua(editor, "return _G.deliveries")
+        self.assertEqual(deliveries[0], deliveries[1])
+
+        # The reported real-world cause: a missing live connection descriptor.
+        self.lua(
+            editor,
+            """
+            require('rediff.harness').select(s.root,{name='amp-live',session='T-closed',connection='/missing/connection.json'})
+            r.add_comment({file=s.current.path,side='new',snapshot_id=s.current.id,
+                selection=require('rediff.selection').line(s.new_buf,5)},'Retain after disconnect')
+        """,
+        )
+        self.keys(editor, ":w<CR>")
+        self.wait_for(editor, "s.delivery == 'failed'")
+        self.keys(editor, ":w<CR>")
+        self.assertFalse(editor.api.get_mode()["blocking"])
+        self.assertEqual(1, self.lua(editor, "return #s.comments"))
+        messages = editor.api.exec2("messages", {"output": True})["output"]
+        self.assertIn(":harness connect amp", messages)
+        self.assertNotIn("feedback.lua:", messages)
+
     def test_harness_pane_write_sends_only_its_active_review_annotations(self):
         editor = self.launch(self.root)
         editor.exec_lua(
@@ -1000,6 +1079,24 @@ class EditorUI(unittest.TestCase):
         panel_text = "\n".join(editor.current.buffer[:])
         self.assertIn("external worktree", panel_text)
         self.assertIn("shell_command", panel_text)
+        self.assertIn(
+            "T-local · agent: idle · feedback: idle",
+            self.lua(editor, "return require('rediff.harness').statusline(s.root)"),
+        )
+        self.lua(editor, "emit_activity('T-local',s.root,1,'running','read_file')")
+        pump(editor)
+        self.assertIn(
+            "T-local · agent: running · feedback: idle",
+            editor.api.eval_statusline(editor.options["statusline"], {})["str"],
+        )
+        self.lua(editor, "emit_activity('T-local',s.root,2,'unknown')")
+        pump(editor)
+        self.assertIn(
+            "T-local · agent: unknown · feedback: idle",
+            self.lua(editor, "return require('rediff.harness').statusline(s.root)"),
+        )
+        self.assertEqual("T-local", self.lua(editor, "return s.harness.session"))
+        self.lua(editor, "emit_activity('T-local',s.root,3,'running')")
         frame = self.lua(editor, "return require('rediff.harness_panel').state.frame")
         self.wait_for(editor, f"require('rediff.harness_panel').state.frame ~= {frame}")
         editor.ui_try_resize(100, 28)
@@ -1032,6 +1129,10 @@ class EditorUI(unittest.TestCase):
             "Local annotation", annotation["payload"]["comments"][0]["text"]
         )
         self.assertEqual(0, self.lua(editor, "return #s.comments"))
+        self.assertIn(
+            "T-local · agent: running · feedback: accepted",
+            self.lua(editor, "return require('rediff.harness').statusline(s.root)"),
+        )
         self.assertFalse(
             self.lua(
                 editor,
@@ -1352,7 +1453,6 @@ class EditorUI(unittest.TestCase):
             [pending, pending, pending, "First Author", "Second Author", pending]
         )
         blame(1, "Not committed yet", ":gitgud pr<CR>")
-        self.assertEqual(0, editor.funcs.exists(":Gitsigns"))
         self.assertEqual(0, editor.funcs.exists(":GitBlame"))
         self.assertEqual(
             ["blame", "blame-line", "blame-toggle", "pr", "toggle"],
@@ -1404,6 +1504,53 @@ class EditorUI(unittest.TestCase):
         self.assertIn(committed[:12], blame(4, "Second Author"))
         full_blame([pending, pending, "First Author", "Second Author", pending])
 
+    def test_git_gutter_tracks_unsaved_edits_but_not_review_snapshots(self):
+        path = Path(self.root, "gutter.txt")
+        original = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n"
+        path.write_text(original)
+        subprocess.run(["git", "-C", self.root, "add", "gutter.txt"], check=True)
+        subprocess.run(
+            ["git", "-C", self.root, "commit", "-m", "Gutter fixture"],
+            check=True, capture_output=True,
+        )
+        editor = self.launch(self.root, file="gutter.txt")
+        signs = """(function()
+            local signs = {}
+            for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(0,-1,0,-1,{details=true})) do
+                local hl = mark[4].sign_hl_group or ''
+                if hl:match('^GitSigns') then
+                    signs[#signs+1] = {mark[2]+1, hl}
+                end
+            end
+            table.sort(signs, function(a,b) return a[1] < b[1] end)
+            return signs
+        end)()"""
+        self.wait_for(editor, "vim.b.gitsigns_head ~= nil")
+        self.assertEqual([], self.lua(editor, "return " + signs))
+        editor.current.buffer[:] = ["one", "TWO", "three", "four", "added", "five", "six", "eight"]
+        self.wait_for(editor, "#" + signs + " == 3")
+        self.assertEqual(
+            [[2, "GitSignsChange"], [5, "GitSignsAdd"], [7, "GitSignsDelete"]],
+            self.lua(editor, "return " + signs),
+        )
+        self.assertEqual(original, path.read_text(), "Gutter includes unsaved edits")
+        editor.command("colorscheme rose-pine")
+        for group, color in (("GitSignsAdd", 0xA6E3A1), ("GitSignsChange", 0xF9E2AF), ("GitSignsDelete", 0xF38BA8)):
+            self.assertEqual(color, editor.api.get_hl(0, {"name": group, "link": False})["fg"])
+        editor.command("write")
+        editor.command("Review")
+        for layout in ("split", "merged"):
+            self.lua(editor, f"r.view('{layout}')")
+            for pane in ("new", "old") if layout == "split" else ("new",):
+                self.lua(editor, f"vim.api.nvim_set_current_win(s.{pane}_win)")
+                self.assertEqual([], self.lua(editor, "return " + signs))
+                self.assertIsNone(self.lua(editor, "return vim.b.gitsigns_head"))
+        editor.command("ReviewLeave")
+        Path(self.root, "untracked.txt").write_text("new file\n")
+        editor.command("edit untracked.txt")
+        self.wait_for(editor, "#" + signs + " == 1")
+        self.assertEqual([[1, "GitSignsUntracked"]], self.lua(editor, "return " + signs))
+
     def test_gitgud_inline_blame_discards_stale_results(self):
         editor = self.launch(self.root, file="auth.lua")
         visible = """(function()
@@ -1413,9 +1560,9 @@ class EditorUI(unittest.TestCase):
             end
             return table.concat(text, ' ')
         end)()"""
-        self.keys(editor, ":gitgud<CR>")
+        # Startup enables annotations without a command or explicit CursorHold.
         self.wait_for(editor, visible + ":find('Review Test',1,true) ~= nil")
-        editor.command("GitGud")
+        self.keys(editor, ":gitgud<CR>")
         self.assertEqual("", self.lua(editor, "return " + visible))
         editor.command("GitGud toggle")
         self.wait_for(editor, visible + ":find('Review Test',1,true) ~= nil")
@@ -1929,6 +2076,9 @@ class EditorUI(unittest.TestCase):
                         )
                     )
                 self.keys(editor, "<Esc>")
+                self.assertEqual(["Review this range"], editor.current.buffer[:])
+                self.assertIsNotNone(self.lua(editor, "return s.composer"))
+                self.keys(editor, ":q<CR>")
                 self.wait_for(editor, "s.composer == nil")
                 self.assertEqual(0, self.lua(editor, "return #s.comments"))
                 self.assertTrue(
@@ -1940,7 +2090,7 @@ class EditorUI(unittest.TestCase):
         self.wait_for(editor, "s.composer == nil")
         self.keys(editor, "iUnsaved edit<Esc>")
         self.assertIsNotNone(self.lua(editor, "return s.composer"))
-        self.keys(editor, "<Esc>")
+        self.keys(editor, ":q<CR>")
         self.wait_for(editor, "s.composer == nil")
         self.assertEqual("Saved note", self.lua(editor, "return s.comments[1].text"))
         self.assertIsNone(self.lua(editor, "return s.last_submission"))
@@ -1980,7 +2130,7 @@ class EditorUI(unittest.TestCase):
         cases = (
             ("new", 5, "First draft", ":q<CR>"),
             ("new", 17, "Second draft", ":q!<CR>"),
-            ("old", 5, "Old-side draft", "<Esc>"),
+            ("old", 5, "Old-side draft", ":q<CR>"),
         )
         for side, line, text, closing in cases:
             self.lua(editor, f"vim.api.nvim_set_current_win(s.{side}_win)")
@@ -1990,6 +2140,22 @@ class EditorUI(unittest.TestCase):
         self.assertEqual(0, self.lua(editor, "return #s.comments"))
         self.keys(editor, ":w<CR>")
         self.assertIsNone(self.lua(editor, "return s.last_submission"))
+        # A live refresh on another file must retain the closed drafts' source
+        # snapshots, even though none of those drafts has become a saved note.
+        self.lua(
+            editor,
+            "for i,e in ipairs(s.entries) do if e.path == 'plan.md' then r.show(i); break end end; "
+            "vim.api.nvim_set_current_win(s.new_win)",
+        )
+        self.assertTrue(self.lua(editor, "return r.refresh_live()"))
+        self.keys(editor, "i<Esc>")
+        self.assertIsNotNone(
+            self.lua(editor, "return s.composer"),
+            editor.vars.get("startup_notice"),
+        )
+        self.assertEqual([""], list(editor.current.buffer[:]))
+        self.keys(editor, "iNew-file draft<Esc>:q<CR>")
+        self.wait_for(editor, "s.composer == nil")
         self.lua(editor, "r.leave(); r.open(); require('rediff.live').stop(r.state)")
         for side, line, text, _ in cases:
             self.lua(editor, f"vim.api.nvim_set_current_win(s.{side}_win)")
@@ -2035,7 +2201,8 @@ class EditorUI(unittest.TestCase):
         self.assertEqual(annotated, "\n".join(source[:]) + "\n")
         # A user's buffer-local mapping must survive both mode transitions.
         editor.exec_lua(
-            "vim.keymap.set('n','x',function() vim.g.restored_map=true end,{buffer=0})"
+            "vim.keymap.set('n','x',function() vim.g.restored_map=true end,{buffer=0}); "
+            "vim.keymap.set('n','<Esc>',function() vim.g.restored_escape=true end,{buffer=0})"
         )
         self.keys(editor, " a")
         self.assertIn("ANNOTATE", self.lua(editor, "return r.statusline()"))
@@ -2068,15 +2235,26 @@ class EditorUI(unittest.TestCase):
         self.assertFalse(source.options["modified"])
         # Deletion and draft handling use the same controls as Review.
         self.keys(editor, "diUnsent draft<Esc><Esc>")
+        composer = editor.current.buffer.number
+        self.assertNotEqual(source.number, composer)
+        self.assertEqual(["Unsent draft"], editor.current.buffer[:])
+        # Escape in the source must not disable annotations while a note is open.
+        editor.exec_lua("vim.api.nvim_set_current_win(require('rediff.annotations').context().new_win)")
+        self.keys(editor, "<Esc>")
+        self.assertFalse(source.options["modifiable"])
+        self.assertEqual(composer, editor.exec_lua("return require('rediff.annotations').context().composer"))
+        self.keys(editor, "i<Esc>:q<CR>")
         self.assertEqual(source.number, editor.current.buffer.number)
         self.keys(editor, "i<Esc>")
         self.assertEqual(["Unsent draft"], editor.current.buffer[:])
         self.keys(editor, ":w<CR>")
         self.assertEqual(source.number, editor.current.buffer.number)
-        self.keys(editor, " a")
+        self.keys(editor, "<Esc>")
         self.assertTrue(source.options["modifiable"])
-        self.keys(editor, "x")
+        self.assertIsNone(editor.exec_lua("return vim.g.restored_escape"))
+        self.keys(editor, "x<Esc>")
         self.assertTrue(editor.exec_lua("return vim.g.restored_map"))
+        self.assertTrue(editor.exec_lua("return vim.g.restored_escape"))
         self.keys(editor, "ggI-- later edit <Esc>")
         self.assertEqual("-- later edit " + annotated, "\n".join(source[:]) + "\n")
         # Notes keep their exact original snapshot after ordinary editing.
@@ -2378,6 +2556,119 @@ class EditorUI(unittest.TestCase):
                 'return vim.fn.maparg("{", "n") == "" and vim.fn.maparg("}", "n") == "" and vim.fn.maparg("@", "n") == ""',
             )
         )
+
+    def test_annotation_freshness_tracks_only_annotated_lines(self):
+        editor = self.launch(self.root)
+        path = Path(self.root, "auth.lua")
+        original = path.read_text().splitlines(keepends=True)
+        self.lua(
+            editor,
+            """
+            require('rediff.live').stop(s)
+            local selection = require('rediff.selection')
+            r.add_comment({file=s.current.path,side='new',snapshot_id=s.current.id,
+                selection=selection.capture(s.new_buf,'V',{s.new_buf,4,1,0},{s.new_buf,7,1,0})},'Boundary note')
+            r.add_comment({file=s.current.path,side='new',snapshot_id=s.current.id,
+                selection=selection.line(s.new_buf,17)},'Refresh note')
+            r.add_comment({file=s.current.path,side='old',snapshot_id=s.current.id,
+                selection=selection.line(s.old_buf,17)},'Old-side note')
+            _G.freshness_warnings = {}
+            vim.notify = function(message,level)
+                if level == vim.log.levels.WARN then table.insert(_G.freshness_warnings,message) end
+            end
+        """,
+        )
+
+        def replace(line, text):
+            lines = original.copy()
+            lines[line - 1] = text + "\n"
+            return lines
+
+        cases = [
+            ("another hunk", replace(11, "M.timeout = 90"), []),
+            ("insert before region", original[:3] + ["-- before\n"] + original[3:], []),
+            ("insert after region", original[:7] + ["-- after\n"] + original[7:], []),
+            ("delete before region", original[2:], []),
+            (
+                "insert inside region",
+                original[:5] + ["    audit()\n"] + original[5:],
+                ["4–7"],
+            ),
+            ("delete inside region", original[:4] + original[6:], ["4–7"]),
+            (
+                "another note in same snapshot",
+                replace(17, "  return token:refresh()"),
+                ["17–17"],
+            ),
+            ("restore region", original, []),
+        ]
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                self.root,
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Unrelated HEAD change",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        for label, lines, changed in cases:
+            with self.subTest(label=label):
+                path.write_text("".join(lines))
+                self.lua(editor, "_G.freshness_warnings={}; r.submit()")
+                warnings = self.lua(editor, "return _G.freshness_warnings")
+                self.assertEqual(bool(changed), bool(warnings), warnings)
+                for region in changed:
+                    self.assertIn("auth.lua:" + region, warnings[0])
+                marks = self.lua(
+                    editor,
+                    """
+                    local result = {}
+                    for _,mark in ipairs(vim.api.nvim_buf_get_extmarks(s.new_buf,
+                        vim.api.nvim_get_namespaces()['rediff.annotations'],0,-1,{details=true})) do
+                        for _,row in ipairs(mark[4].virt_lines or {}) do
+                            for _,chunk in ipairs(row) do
+                                if chunk[1]:find('changed since annotated',1,true) then
+                                    table.insert(result,mark[2]+1)
+                                end
+                            end
+                        end
+                    end
+                    return result
+                """,
+                )
+                self.assertEqual(
+                    [int(region.split("–")[1]) for region in changed], marks
+                )
+                self.assertEqual(
+                    "".join(original), self.lua(editor, "return s.current.new")
+                )
+                self.assertEqual(
+                    "Boundary note", self.lua(editor, "return s.comments[1].text")
+                )
+
+        # A change while typing updates the title without closing the note or
+        # recoloring its orange border. Reverting the source clears the badge.
+        self.lua(editor, "r.edit_comment(s.comments[1])")
+        self.keys(editor, "Draft: ")
+        composer = editor.current.buffer.number
+        path.write_text("".join(replace(5, "    return token:is_valid()")))
+        title = "table.concat(vim.tbl_map(function(c) return c[1] end,vim.api.nvim_win_get_config(s.composer_win).title))"
+        self.wait_for(editor, title + ":find('changed since annotated',1,true) ~= nil")
+        self.assertEqual(composer, editor.current.buffer.number)
+        self.assertEqual("Draft: Boundary note", editor.current.buffer[0])
+        self.assertIn(
+            "FloatBorder:ReviewAnnotation",
+            editor.current.window.options["winhighlight"],
+        )
+        self.assertEqual(
+            0xFF9E64, editor.api.get_hl(0, {"name": "ReviewAnnotation"})["fg"]
+        )
+        path.write_text("".join(original))
+        self.wait_for(editor, title + ":find('changed since annotated',1,true) == nil")
 
     def test_tree_annotation_indicators(self):
         subprocess.run(["git", "-C", self.root, "add", "auth.lua"], check=True)
@@ -4425,7 +4716,10 @@ class EditorUI(unittest.TestCase):
 
     def test_branch_and_manual_refresh(self):
         editor = self.launch(self.root)
-        self.assertIn(" REVIEW · main · ", self.lua(editor, "return r.statusline()"))
+        self.assertIn(
+            " REVIEW · main · ",
+            editor.api.eval_statusline(editor.options["statusline"], {})["str"],
+        )
         # Branch identity updates even with no changed-file status transition.
         subprocess.run(
             ["git", "-C", self.root, "checkout", "-b", "topic%branch"],
@@ -5819,6 +6113,54 @@ with open(sys.argv[1], 'ab', buffering=0) as log:
         self.keys(editor, ":ReviewLeave<CR>")
         self.assertIn(names[0], header(first))
         self.assertIn("tests/renamed.lua", header(second))
+
+    def test_file_header_close_targets_clicked_buffer_and_confirms_unsaved_changes(self):
+        editor = self.launch(self.root, file="auth.lua")
+        first = editor.current.window.handle
+        first_buf = editor.current.buffer.number
+        editor.command("vsplit plan.md")
+        second = editor.current.window.handle
+        second_buf = editor.current.buffer.number
+
+        def click_close(win, button="left"):
+            row, col = editor.api.win_get_position(win)
+            buf = editor.api.win_get_buf(win)
+            name = Path(editor.api.buf_get_name(buf)).name
+            modified = editor.api.get_option_value("modified", {"buf": buf})
+            expected = f" {name}{' [+]' if modified else ''} × "
+            header = editor.api.eval_statusline(
+                editor.api.get_option_value("winbar", {"win": win}),
+                {"winid": win, "use_winbar": True},
+            )["str"]
+            self.assertEqual(expected, header)
+            col += expected.index("×")
+            editor.api.input_mouse(button, "press", "", 0, row, col)
+            editor.api.input_mouse(button, "release", "", 0, row, col)
+            pump(editor)
+
+        click_close(first, "right")
+        self.assertTrue(editor.funcs.buflisted(first_buf))
+        click_close(first)
+        self.assertFalse(editor.funcs.buflisted(first_buf))
+        self.assertTrue(editor.funcs.buflisted(second_buf))
+        self.assertEqual(second_buf, editor.current.buffer.number)
+
+        path = Path(self.root, "plan.md")
+        original = path.read_text()
+        editor.current.buffer[0] = "Unsaved close-button edit"
+        click_close(second)
+        self.keys(editor, "c")
+        self.assertTrue(editor.funcs.buflisted(second_buf))
+        self.assertTrue(editor.current.buffer.options["modified"])
+        self.assertEqual("Unsaved close-button edit", editor.current.buffer[0])
+        self.assertEqual(original, path.read_text())
+
+        click_close(second)
+        self.keys(editor, "y<CR>")
+        self.assertFalse(editor.funcs.buflisted(second_buf))
+        self.assertTrue(path.read_text().startswith("Unsaved close-button edit\n"))
+        self.assertEqual("", editor.current.buffer.name)
+        self.assertFalse(editor.current.buffer.options["modified"])
 
     def test_red_green_diff_backgrounds_preserve_syntax_after_theme_reload(self):
         def luminance(color):

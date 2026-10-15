@@ -91,10 +91,36 @@ function M.notes(root)
 			comments = {},
 			drafts = {},
 			snapshots = {},
+			annotation_status = {},
 			harness = harness.get(root).target,
 		}
 	end
 	return reviews[root]
+end
+
+local function annotation_key(anchor)
+	local spans = anchor.selection.spans
+	return table.concat({ anchor.snapshot_id, anchor.side, spans[1].line, spans[#spans].line }, ":")
+end
+
+local function annotation_changed(s, anchor)
+	return M.notes(s.root).annotation_status[annotation_key(anchor)] == "changed"
+end
+
+local function composer_title(s)
+	local anchor = s.draft.anchor
+	local spans = anchor.selection.spans
+	local first, last = spans[1].line, spans[#spans].line
+	local title = {
+		{
+			" Note · " .. first .. (last ~= first and "–" .. last or "") .. " · " .. anchor.side .. " ",
+			"ReviewAnnotation",
+		},
+	}
+	if annotation_changed(s, anchor) then
+		table.insert(title, { "◆ (changed since annotated) ", "ReviewAnnotationChanged" })
+	end
+	return title
 end
 
 -- File views and Review retain the same collections across mode transitions.
@@ -277,12 +303,19 @@ local function render_tree_annotations(s)
 	api.nvim_buf_clear_namespace(s.tree_buf, annotation_ns, 0, -1)
 	local annotated = {}
 	for _, comment in ipairs(s.comments) do
-		annotated[comment.file] = true
+		annotated[comment.file] = annotated[comment.file] == "changed" and "changed"
+			or (annotation_changed(s, comment) and "changed" or "current")
 	end
 	for row, index in pairs(s.rows) do
-		if annotated[s.entries[index].path] then
+		local status = annotated[s.entries[index].path]
+		if status then
 			api.nvim_buf_set_extmark(s.tree_buf, annotation_ns, row - 1, 0, {
-				virt_text = { { "●", "ReviewAnnotation" } },
+				virt_text = {
+					{
+						status == "changed" and "◆" or "●",
+						status == "changed" and "ReviewAnnotationChanged" or "ReviewAnnotation",
+					},
+				},
 				virt_text_pos = "right_align",
 				hl_mode = "combine",
 			})
@@ -343,6 +376,17 @@ local function render_comments(selection_only, s)
 				end
 				padding[row] = {}
 			end
+			if annotation_changed(s, comment) then
+				local badge = wrap_comment("◆ (changed since annotated)", width)
+				for row = #badge, 1, -1 do
+					table.insert(
+						lines,
+						1,
+						{ { (active and string.rep(" ", gutter) or "") .. badge[row], "ReviewAnnotationChanged" } }
+					)
+					table.insert(padding, 1, {})
+				end
+			end
 			place(old and s.old_buf or s.new_buf, comment.line_end, lines, 250 + i, active)
 			if s.old_win then
 				place(
@@ -354,10 +398,48 @@ local function render_comments(selection_only, s)
 			end
 		end
 	end
+	if s.composer_win and api.nvim_win_is_valid(s.composer_win) then
+		api.nvim_win_set_config(s.composer_win, { title = composer_title(s) })
+	end
 	vim.cmd.redrawstatus()
 end
 
 M.render_comments = render_comments
+
+-- Freshness belongs to the annotation, not to the full immutable file snapshot.
+-- Keep it out of comments so a status change cannot alter feedback identity.
+function M.refresh_annotations(root)
+	local notes = M.notes(root)
+	local current, by_file, statuses = {}, {}, {}
+	local anchors = vim.list_slice(notes.comments)
+	for _, draft in ipairs(notes.drafts) do
+		table.insert(anchors, draft.anchor)
+	end
+	for _, anchor in ipairs(anchors) do
+		local snapshot = assert(notes.snapshots[anchor.snapshot_id], "Missing annotation snapshot")
+		local key = entry_key(snapshot)
+		if by_file[key] == nil then
+			local ok, value = pcall(git.snapshot, root, snapshot)
+			by_file[key] = ok and value or false
+		end
+		local latest = by_file[key]
+		current[snapshot.id] = latest
+		statuses[annotation_key(anchor)] = not latest and "unverified"
+			or (
+				selection.changed(snapshot[anchor.side], latest[anchor.side], anchor.selection) and "changed"
+				or "current"
+			)
+	end
+	local changed = not vim.deep_equal(notes.annotation_status, statuses)
+	notes.annotation_status = statuses
+	if changed then
+		if M.state == notes and notes.new_buf and api.nvim_buf_is_valid(notes.new_buf) then
+			render_comments(false, notes)
+		end
+		require("rediff.annotations").refresh()
+	end
+	return current
+end
 
 local function hunk_range(change, side, buf)
 	local range = change[side == "old" and "original" or "modified"]
@@ -780,6 +862,9 @@ function M.refresh_live()
 	for _, comment in ipairs(s.comments) do
 		keep[comment.snapshot_id] = true
 	end
+	for _, draft in ipairs(s.drafts) do
+		keep[draft.anchor.snapshot_id] = true
+	end
 	for id in pairs(s.snapshots) do
 		if not keep[id] then
 			s.snapshots[id] = nil
@@ -1019,6 +1104,7 @@ function M.add_comment(anchor, text, existing_id)
 			if comment.id == existing_id then
 				comment.text = text
 				save()
+				M.refresh_annotations(s.root)
 				render_comments()
 				return comment
 			end
@@ -1039,6 +1125,7 @@ function M.add_comment(anchor, text, existing_id)
 	}
 	table.insert(s.comments, comment)
 	save()
+	M.refresh_annotations(s.root)
 	render_comments()
 	return comment
 end
@@ -1115,12 +1202,7 @@ local function composer_config(s)
 		height = height,
 		style = "minimal",
 		border = "single",
-		title = " Note · "
-			.. spans[1].line
-			.. (last ~= spans[1].line and "–" .. last or "")
-			.. " · "
-			.. anchor.side
-			.. " ",
+		title = composer_title(s),
 		footer = " :w save · :q keep draft ",
 	}
 end
@@ -1171,10 +1253,10 @@ function M.compose(visual, keys, comment)
 		table.insert(s.drafts, draft)
 	end
 	s.draft = draft
+	M.refresh_annotations(s.root)
 	local composer = owned_buffer("review://" .. s.id .. "/comment", vim.split(draft.text, "\n"), true)
 	s.composer = composer
 	vim.bo[composer].filetype = "markdown"
-	vim.keymap.set("n", "<Esc>", "<Cmd>quit<CR>", { buffer = composer, desc = "Keep note draft and close" })
 	s.composer_win = api.nvim_open_win(composer, true, composer_config(s))
 	vim.wo[s.composer_win].wrap = true
 	vim.wo[s.composer_win].linebreak = true
@@ -1287,24 +1369,25 @@ function M.submit(retry)
 		return
 	end
 	assert(not feedback.busy(s.root), "Wait for the current feedback delivery before submitting again")
+	local current = M.refresh_annotations(s.root)
 	local snapshots, snapshot_status, warnings = {}, {}, {}
 	for _, comment in ipairs(s.comments) do
 		local snapshot = assert(s.snapshots[comment.snapshot_id], "Missing comment snapshot")
 		if not snapshots[snapshot.id] then
-			local ok, current = pcall(git.snapshot, s.root, snapshot)
-			local status = not ok and "unverified" or (current.id == snapshot.id and "current" or "changed")
+			local latest = current[snapshot.id]
+			local status = not latest and "unverified" or (latest.id == snapshot.id and "current" or "changed")
 			snapshot_status[snapshot.id] = status
 			snapshots[snapshot.id] = snapshot -- Keep the reviewed text and coordinates, never silently re-anchor.
-			if status ~= "current" then
-				table.insert(warnings, vim.fn.strtrans(snapshot.path) .. " (" .. status .. ")")
-			end
+		end
+		if annotation_changed(s, comment) then
+			table.insert(warnings, vim.fn.strtrans(comment.file) .. ":" .. comment.line .. "–" .. comment.line_end)
 		end
 	end
 	local argv = feedback.command(s.harness)
 	local id, path = feedback.enqueue(s.root, s.comments, snapshots, argv, nil, snapshot_status)
 	if #warnings > 0 then
 		notify(
-			"Sending original review context; agent must check current files: " .. table.concat(warnings, ", "),
+			"Annotated lines changed; sending original review context: " .. table.concat(warnings, ", "),
 			vim.log.levels.WARN
 		)
 	end
@@ -1407,6 +1490,7 @@ local function pick_comments(comments, action)
 		notify("No annotations")
 		return
 	end
+	M.refresh_annotations(s.root)
 	local items = {}
 	for i, comment in ipairs(comments) do
 		local snapshot = s.snapshots[comment.snapshot_id]
@@ -1418,7 +1502,8 @@ local function pick_comments(comments, action)
 			comment.line_end,
 			snapshot.group,
 			comment.side,
-			vim.fn.strtrans((comment.text:gsub("\n", " ")))
+			(annotation_changed(s, comment) and "◆ (changed since annotated) " or "")
+				.. vim.fn.strtrans((comment.text:gsub("\n", " ")))
 		)
 	end
 	require("fzf-lua").fzf_exec(items, {
@@ -1442,6 +1527,7 @@ function M.jump_comment(comment)
 	local s = annotation_state()
 	assert(not s.composer, "Save or close the current annotation before jumping")
 	assert(vim.tbl_contains(s.comments, comment), "Annotation no longer exists")
+	M.refresh_annotations(s.root)
 	local snapshot = assert(s.snapshots[comment.snapshot_id], "Missing annotation snapshot")
 	if s.file_mode and (not s.enabled or snapshot.id ~= s.current.id) then
 		-- Older/other-file anchors use Review's immutable snapshot navigation.
@@ -1581,6 +1667,7 @@ function M.open(root)
 		comments = pending.comments or {},
 		drafts = pending.drafts or {},
 		snapshots = pending.snapshots or {},
+		annotation_status = pending.annotation_status,
 		harness = target,
 		previous_tab = api.nvim_get_current_tabpage(),
 		id = string.format("%.0f", vim.uv.hrtime()),
@@ -1675,7 +1762,7 @@ function M.statusline()
 	if s and api.nvim_get_current_tabpage() == s.tab then
 		local file = s.current and vim.fn.strtrans(s.current.path):gsub("%%", "%%%%")
 			or (#s.entries > 0 and "No file selected" or "No changes")
-		return " REVIEW · "
+		return "%#RediffMode# REVIEW %*· "
 			.. vim.fn.strtrans(s.reference or ""):gsub("%%", "%%%%")
 			.. " · "
 			.. harness.statusline(s.root)
@@ -1690,13 +1777,17 @@ function M.statusline()
 	end
 	local file = require("rediff.annotations").active()
 	if file then
-		return " ANNOTATE · Space a to edit · "
+		return "%#RediffMode# ANNOTATE %*· Space a to edit · "
 			.. #file.comments
 			.. " notes · "
 			.. harness.statusline(file.root)
 			.. " %<%f %m%=%l:%c %p%%"
 	end
-	return " EDIT · " .. vim.fn.mode():upper() .. " · " .. harness.statusline() .. " %<%f %m%=%l:%c %p%%"
+	return "%#RediffMode# EDIT · "
+		.. vim.fn.mode():upper()
+		.. " %*· "
+		.. harness.statusline()
+		.. " %<%f %m%=%l:%c %p%%"
 end
 
 function M.setup()
@@ -1706,6 +1797,7 @@ function M.setup()
 	api.nvim_set_hl(0, "ReviewActiveFile", { bg = palette.highlight_med, bold = true })
 	api.nvim_set_hl(0, "ReviewHunk", { fg = palette.gold, bold = true })
 	local function review_highlights()
+		api.nvim_set_hl(0, "RediffMode", { fg = palette.base, bg = palette.foam, bold = true })
 		api.nvim_set_hl(0, "ReviewAdded", { fg = "#4ade80", bold = true })
 		api.nvim_set_hl(0, "ReviewModified", { fg = "#facc15", bold = true })
 		api.nvim_set_hl(0, "ReviewUntracked", { fg = "#4ade80", bold = true })
@@ -1715,6 +1807,7 @@ function M.setup()
 		api.nvim_set_hl(0, "ReviewUnseenPulse", { fg = palette.text, bold = true })
 		api.nvim_set_hl(0, "ReviewSeen", { fg = palette.foam })
 		api.nvim_set_hl(0, "ReviewAnnotation", { fg = "#ff9e64" })
+		api.nvim_set_hl(0, "ReviewAnnotationChanged", { fg = palette.iris, bold = true })
 		api.nvim_set_hl(0, "ReviewFocusedPane", { fg = palette.base, bg = palette.foam, bold = true })
 		api.nvim_set_hl(0, "ReviewInactivePane", { fg = palette.subtle, bg = palette.surface })
 		-- CursorLine must preserve the status marker's foreground color.
@@ -1722,6 +1815,34 @@ function M.setup()
 		api.nvim_set_hl(0, "ReviewTreeCursor", { fg = "#33445c", bg = "#33445c", blend = 100 })
 	end
 	review_highlights()
+	-- Check notes even while a composer pins the original source snapshot. This
+	-- only updates badges/titles; it never refreshes the source or edits note text.
+	do
+		local timer = assert(vim.uv.new_timer())
+		local checking = false
+		timer:start(
+			3000,
+			3000,
+			vim.schedule_wrap(function()
+				if #api.nvim_list_uis() == 0 then
+					return
+				end
+				local s = M.active() or require("rediff.annotations").context()
+				if s and not checking then
+					checking = true
+					pcall(M.refresh_annotations, s.root)
+					checking = false
+				end
+			end)
+		)
+		api.nvim_create_autocmd("VimLeavePre", {
+			once = true,
+			callback = function()
+				timer:stop()
+				timer:close()
+			end,
+		})
+	end
 	api.nvim_create_autocmd("ColorScheme", { callback = review_highlights })
 	api.nvim_create_autocmd("OptionSet", {
 		pattern = "wrap",

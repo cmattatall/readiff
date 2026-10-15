@@ -2,7 +2,7 @@ local M = {}
 local api = vim.api
 local links = api.nvim_create_namespace("gitgud-links")
 local inline = api.nvim_create_namespace("gitgud-inline")
-local config, inline_enabled, generation = {}, false, 0
+local config, inline_enabled, generation = {}, true, 0
 local inline_buf
 
 local function git(root, args)
@@ -368,6 +368,12 @@ function M.setup(opts)
 		{ group = group, callback = clear_inline }
 	)
 	api.nvim_create_autocmd("CursorHold", { group = group, callback = update_inline })
+	api.nvim_create_autocmd("VimEnter", {
+		group = group,
+		callback = function()
+			vim.schedule(update_inline)
+		end,
+	})
 end
 
 return M

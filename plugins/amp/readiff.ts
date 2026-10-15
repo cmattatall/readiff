@@ -55,7 +55,7 @@ type Outcome = { content: string; result: Promise<void> }
 const HEARTBEAT_MS = 15_000
 const MAX_STREAM_BUFFER = 64 * 1024
 
-async function createActivity(thread: PluginThread, root: string): Promise<Activity> {
+async function createActivity(amp: PluginAPI, thread: PluginThread, root: string): Promise<Activity> {
   let state: ActivityState = 'unknown'
   let title = ''
   let observedState = false
@@ -100,6 +100,25 @@ async function createActivity(thread: PluginThread, root: string): Promise<Activ
     thread.state.get().then((value) => { if (!observedState) state = value }).catch(() => {}),
     thread.title.get().then((value) => { if (!observedTitle) title = value ?? '' }).catch(() => {}),
   ])
+  // A CLI can detach from a thread without another state event. Re-read the host
+  // state so that missed events recover and detached threads do not stay "idle".
+  let disposed = false
+  let refreshing = false
+  const refresh = setInterval(async () => {
+    if (refreshing) return
+    refreshing = true
+    const previous = sequence
+    let value: ActivityState = 'unknown'
+    try { value = await amp.threads.get(thread.id).state.get() } catch { /* Detached threads cannot be observed by this host. */ }
+    refreshing = false
+    if (disposed || sequence !== previous) return
+    const clearTools = value === 'idle' || value === 'error' || value === 'unknown'
+    if (state === value && !(clearTools && tools.size)) return
+    state = value
+    if (clearTools) tools.clear()
+    publish()
+  }, HEARTBEAT_MS)
+  refresh.unref()
   return {
     call(id, tool) { tools.set(id, tool); publish() },
     result(id, filesChanged) {
@@ -124,6 +143,8 @@ async function createActivity(thread: PluginThread, root: string): Promise<Activ
       write(client, line())
     },
     dispose() {
+      disposed = true
+      clearInterval(refresh)
       for (const subscription of subscriptions) subscription.unsubscribe()
       for (const client of clients) {
         clearInterval(client.heartbeat)
@@ -205,7 +226,7 @@ export default async function readiffPlugin(amp: PluginAPI): Promise<void> {
     const thread: PluginThread = ctx.thread
     // A title is optional metadata; failure to read it must not prevent review.
     const title = await thread.title.get().catch(() => null)
-    const activity = await createActivity(thread, root)
+    const activity = await createActivity(amp, thread, root)
 
     const server = createServer((request, response) => {
       void (async () => {

@@ -161,7 +161,7 @@ return function(root, equal, fails, keys)
 	equal("amp", session.provider, "Use persists the worktree launch type")
 	equal("amp-live", s.harness.name, "Lowercase use connects Review feedback to the only live session")
 	equal(
-		"harness: amp-live · …44444444 · idle",
+		"harness: amp-live · …44444444 · agent: unknown · feedback: idle",
 		harness.statusline(root),
 		"Status names the live harness and thread suffix"
 	)
@@ -269,7 +269,7 @@ return function(root, equal, fails, keys)
 	vim.api.nvim_set_current_tabpage(s.previous_tab)
 	equal(
 		true,
-		review.statusline():find("harness: amp-live · T-second · idle", 1, true) ~= nil,
+		review.statusline():find("harness: amp-live · T-second · agent: unknown · feedback: idle", 1, true) ~= nil,
 		"Editing also displays the binding"
 	)
 	local git = require("rediff.git")
@@ -277,7 +277,11 @@ return function(root, equal, fails, keys)
 	git.root = function()
 		error("Status redraw must not run Git")
 	end
-	equal("harness: amp-live · T-second · idle", harness.statusline(), "Repeated redraw reuses workspace context")
+	equal(
+		"harness: amp-live · T-second · agent: unknown · feedback: idle",
+		harness.statusline(),
+		"Repeated redraw reuses workspace context"
+	)
 	git.root = get_root
 	vim.api.nvim_set_current_tabpage(s.tab)
 	for _, entry in ipairs(connections.connected()) do
@@ -369,7 +373,9 @@ return function(root, equal, fails, keys)
 		vim.api.nvim_set_current_win(s.new_win)
 		keys(":w<CR>")
 		finish("failed")
-		equal(true, notices[1]:find("Fixture failure", 1, true) ~= nil, "Delivery failure is reported")
+		equal(true, notices[1]:find(":Harness status", 1, true) ~= nil, "Delivery failure offers recovery details")
+		harness.status()
+		equal(true, notices[#notices]:find("Fixture failure", 1, true) ~= nil, "Status explains the delivery failure")
 		equal({ retained }, s.comments, "Failure preserves the annotation batch")
 		harness.retry()
 		finish("accepted")

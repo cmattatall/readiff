@@ -227,6 +227,15 @@ function M.statusline(root)
 	elseif s.target.name == "amp" or s.target.name == "omp" or s.target.name == "claude" then
 		label = label .. " · no session"
 	end
+	if id and feedback.is_live(s.target) then
+		local entry = connections.get(connections.key(vim.tbl_extend("force", s.target, { root = s.root })))
+		local activity = entry and entry.activity and entry.activity.state or "unknown"
+		if entry and entry.online == false then
+			activity = "offline"
+		end
+		label = label .. " · agent: " .. activity .. " · feedback: " .. s.delivery
+		return "harness: " .. vim.fn.strtrans(label):gsub("%%", "%%%%")
+	end
 	return "harness: " .. vim.fn.strtrans(label .. " · " .. s.delivery):gsub("%%", "%%%%")
 end
 
@@ -908,8 +917,16 @@ function M.deliver(root, id, path, argv, retry, callback)
 		s.delivery = status.status
 		if status.status == "accepted" or status.status == "completed" then
 			require("rediff.review").clear_sent(root, path)
-		elseif status.status == "failed" then
-			notify("Feedback failed: " .. (status.error or "Inspect :ReviewOutbox before retrying"), "failed")
+		elseif status.status == "failed" or status.status == "uncertain" then
+			-- Keep long receiver diagnostics in the receipt/status view, not in
+			-- an asynchronous message that can interrupt editing with hit-enter.
+			local message = "Feedback " .. status.status .. "; notes kept. :Harness status for recovery."
+			if feedback.is_live(s.target) and vim.fn.filereadable(s.target.connection) == 0 then
+				message = feedback.provider(s.target)
+					.. " disconnected; notes kept. :harness connect "
+					.. feedback.provider(s.target)
+			end
+			vim.notify(message, vim.log.levels.WARN)
 		else
 			notify("Feedback kept in local outbox (:ReviewOutbox)")
 		end
@@ -945,6 +962,13 @@ function M.status()
 			.. (s.target.session and (" · " .. s.target.session) or "")
 			.. "\nLast delivery: "
 			.. (status and status.status or "none")
+			.. (status and status.error and ("\nReason: " .. vim.trim(status.error)) or "")
+			.. (
+				status
+					and (status.status == "failed" or status.status == "running")
+					and "\nNotes retained. Check the agent before :ReviewRetry; reconnect first if the connection has closed."
+				or ""
+			)
 	)
 end
 
@@ -1117,6 +1141,9 @@ function M.install(provider)
 end
 
 function M.setup()
+	connections.on_change(function()
+		vim.cmd.redrawstatus()
+	end)
 	api.nvim_create_autocmd("WinScrolled", {
 		callback = function()
 			for id in pairs(vim.v.event) do

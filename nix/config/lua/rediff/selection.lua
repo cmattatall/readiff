@@ -36,4 +36,25 @@ function M.line(buf, line)
 	}
 end
 
+-- Compare in the original coordinates. Edits before a selection may shift it
+-- without changing it; insertions at either outside boundary are not part of it.
+function M.changed(original, current, region)
+	local first, last = region.spans[1].line, region.spans[#region.spans].line
+	for _, change in ipairs(vim.diff(original, current, { result_type = "indices", algorithm = "minimal" })) do
+		local start, count = change[1], change[2]
+		if count == 0 then
+			if first <= start and start < last then
+				return true
+			end
+		else
+			for _, span in ipairs(region.spans) do
+				if start <= span.line and span.line < start + count then
+					return true
+				end
+			end
+		end
+	end
+	return false
+end
+
 return M

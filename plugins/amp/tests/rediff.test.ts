@@ -51,6 +51,7 @@ function fakeAmp(root = process.cwd()) {
   const notifications: string[] = []
   const threads = new Map<string, any>()
   const amp: any = {
+    threads: { get: (id: string) => threads.get(id) },
     helpers: { filePathFromURI: fileURLToPath, filesModifiedByToolCall: () => null },
     logger: { log() {} },
     on(event: string, handler: (event: unknown, ctx: any) => any) { events.set(event, handler); return { unsubscribe() {} } },
@@ -279,6 +280,48 @@ test('activity streams full safe snapshots to multiple clients and clean up', as
   assert.equal(thread.state.observers.size, 0)
   assert.equal(thread.title.observers.size, 0)
   await second.cancel().catch(() => {})
+})
+
+test('activity refreshes missed states, forgets detached tools, and preserves newer events', { timeout: 5000 }, async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  const f = fakeAmp(); await plugin(f.amp)
+  t.after(() => Promise.all(f.disposers.map((dispose) => dispose())))
+  const c = await connect(f, 'T-refresh')
+  const stream = await eventStream(c.descriptor)
+  t.after(() => stream.cancel())
+  assert.equal((await stream.next()).state, 'idle')
+  const thread = f.threads.get('T-refresh')
+  // The invocation handle may outlive the connection that originally supplied it.
+  const current = { ...thread, state: new ObservableMock('running') }
+  f.threads.set('T-refresh', current)
+  const get = t.mock.method(current.state, 'get', async () => 'running')
+  t.mock.timers.tick(15_000)
+  assert.equal((await stream.next()).state, 'running', 'recover a missed subscription event')
+
+  await f.events.get('tool.call')!({
+    thread: { id: 'T-refresh' }, toolUseID: 'detached', tool: 'shell_command', input: {},
+  }, f.context('T-refresh'))
+  assert.equal((await stream.next()).tool, 'shell_command')
+  get.mock.mockImplementation(async () => { throw new Error('thread.state is only available for connected threads') })
+  t.mock.timers.tick(15_000)
+  const detached = await stream.next()
+  assert.equal(detached.state, 'unknown', 'a detached thread must not keep its last observed state')
+  assert.equal(detached.tool, null)
+  assert.equal(detached.thread, 'T-refresh', 'feedback stays bound to the selected thread')
+
+  get.mock.mockImplementation(async () => 'idle')
+  t.mock.timers.tick(15_000)
+  assert.equal((await stream.next()).state, 'idle', 'resume observation when the thread reconnects')
+  let resolve!: (state: string) => void
+  get.mock.mockImplementation(() => new Promise<string>((done) => { resolve = done }))
+  t.mock.timers.tick(15_000)
+  thread.state.emit('running')
+  assert.equal((await stream.next()).state, 'running')
+  resolve('idle')
+  await new Promise((done) => setImmediate(done))
+  const reconnected = await eventStream(c.descriptor)
+  t.after(() => reconnected.cancel())
+  assert.equal((await reconnected.next()).state, 'running', 'a late poll cannot overwrite a newer event')
 })
 
 test('completed file tools invalidate only their worktree and survive reconnects', async (t) => {

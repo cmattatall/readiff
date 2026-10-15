@@ -26,10 +26,26 @@ require("rose-pine").setup({
 	dark_variant = "main",
 	-- Dark teal keywords/paths and muted comments disappear on diff backgrounds.
 	palette = { main = { pine = "#8fc3ce" } },
-	highlight_groups = { Comment = { fg = "#b9b6cd" } },
+	highlight_groups = {
+		Comment = { fg = "#b9b6cd" },
+		GitSignsAdd = { fg = "#a6e3a1" },
+		GitSignsChange = { fg = "#f9e2af" },
+		GitSignsDelete = { fg = "#f38ba8" },
+	},
 })
 vim.cmd.colorscheme("rose-pine")
 vim.fn.mkdir(vim.fn.stdpath("data"), "p")
+
+require("gitsigns").setup({
+	attach_to_untracked = true,
+	signs_staged_enable = false,
+	current_line_blame = false,
+	on_attach = function(buf)
+		if vim.bo[buf].buftype ~= "" or vim.startswith(vim.api.nvim_buf_get_name(buf), "review://") then
+			return false
+		end
+	end,
+})
 
 vim.keymap.set("n", "<D-w>", "<C-w>", { desc = "Window command prefix (Cmd-w)" })
 vim.keymap.set({ "i", "x" }, "<D-w>", "<Esc><C-w>", { desc = "Leave editing/selection for window command" })
@@ -260,7 +276,14 @@ vim.keymap.set("n", "<leader>E", function()
 end, { desc = "Toggle file tree (focus in Review)" })
 vim.opt.laststatus = 3
 vim.opt.statusline = "%{%v:lua.require('rediff.review').statusline()%}"
-local file_winbar = " %<%f %m"
+function _G.RediffCloseBuffer(_, _, button)
+	if button == "l" then
+		vim.api.nvim_win_call(vim.fn.getmousepos().winid, function()
+			vim.cmd("confirm bdelete")
+		end)
+	end
+end
+local file_winbar = " %<%f%( %m%)%@v:lua.RediffCloseBuffer@ × %X"
 vim.api.nvim_create_autocmd("BufWinEnter", {
 	callback = function()
 		if vim.bo.buftype == "" and vim.api.nvim_win_get_config(0).relative == "" then
