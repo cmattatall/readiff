@@ -403,26 +403,25 @@ passes through to the harness for word deletion, including repeated presses.
 Toggling Review with **Space r** moves an open harness pane between Review and
 editing, using the same window, process, and terminal buffer. Hiding the pane in
 either mode keeps it hidden across toggles until **:ho** reopens it.
-**:harness open** / **:ho** opens the current worktree's selected harness, or its
-only connected/editor-owned harness, without a chooser. Multiple local harnesses
-with no selected default prompt for a choice; other worktrees are excluded.
+**:harness open** / **:ho** opens the current worktree's only connected/editor-owned
+harness without a chooser. Multiple local harnesses prompt for a choice, even if
+one is already selected; other worktrees are excluded.
 With no session or configured provider, it asks which harness to start and saves
 that provider for the worktree. Cancelling the picker starts nothing.
 Opening a connected session makes it this worktree's annotation target.
-An editor-owned TUI reopens its existing terminal. An external live connection
-opens the connection/activity panel instead, without a resume prompt or another CLI.
-The bridge carries annotations and activity, not the external terminal's screen or
-keyboard input; continue chatting and interrupting work in its original terminal.
+An editor-owned TUI reopens its existing terminal. For an external Amp or Claude
+session, explicit open asks before starting its CLI in the embedded terminal.
+Stop using the other terminal first: this resumes the same thread in a new TUI,
+not an attachment to the existing process. Cancelling starts nothing.
+Automatic startup and connecting for feedback do not move live sessions or start
+another CLI. The bridge itself carries annotations and activity, not terminal input.
 After a disconnect, **:harness open** rediscovers live sessions, including after
 restarting Neovim or opening a file instead of Review. Without a live match, Amp
 checks its saved thread before starting fresh; other adapters retain their launch behavior.
-Saved connections are rechecked before opening the activity panel: after Amp exits
-(including Ctrl-C), opening it again offers to resume the saved thread in a new TUI.
-**:harness resume** also reconnects to a live session rather than starting another
-CLI. If the selected session is live in another worktree, it refuses to launch.
-For saved Amp/Claude sessions without a live bridge, resume asks before starting
-a TUI; stop using any other terminal for that session first. This is not process
-attachment or a new thread.
+After Amp exits (including Ctrl-C), opening it again offers to resume the saved
+thread in a new TUI. **:harness resume** also asks before starting an Amp/Claude
+TUI and reuses an existing editor-owned terminal. If discovery finds the selected
+session in a different worktree, it refuses to launch it in the wrong directory.
 A resumed live Amp session reconnects feedback when its plugin registers
 a fresh endpoint for the same thread and worktree. Until then, annotations stay saved;
 retry **:w** after it connects. OMP resumption is unsupported.
@@ -581,6 +580,14 @@ Multiple harnesses can remain connected. Selecting a local harness also sets
 the worktree's annotation target; selecting an external harness never does.
 Annotations cannot be sent across worktrees. To type to an agent directly, use
 `:harness open` / `:ho` and its embedded terminal.
+In `:harness list`, **o** opens the highlighted harness in the existing pane,
+without disconnecting other sessions. Editor-owned terminals are reused; external
+Amp/Claude sessions ask for confirmation before resuming in a new terminal.
+You can open a session from another worktree: its CLI runs in that session's
+directory, and the current review's annotation target stays unchanged.
+OMP remains activity-only because resuming an OMP session is not supported.
+The **[open]** badge identifies the terminal visible in the current tab, independently
+of the highlighted row or connection status; hidden terminals have no badge.
 
 The panel receives authenticated Amp activity snapshots asynchronously: running,
 idle, awaiting approval, error, and active tool name, without tool inputs/outputs.

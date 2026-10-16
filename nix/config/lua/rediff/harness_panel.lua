@@ -168,8 +168,9 @@ local function render()
 		local marker = index == s.selected and "›" or " "
 		local label = entry.alias or (entry.title ~= "" and entry.title) or entry.session or entry.key
 		local line = string.format(
-			"%s %-10s %-20s %-6s %s",
+			"%s %-6s %-10s %-20s %-6s %s",
 			marker,
+			require("rediff.harness").is_open(entry) and "[open]" or "",
 			status(entry),
 			vim.fn.strcharpart(text(label), 0, 20),
 			text(entry.provider),
@@ -219,7 +220,7 @@ local function render()
 	end
 	local action = entry and entry.connected and "Enter disconnect" or "Enter connect"
 	table.insert(lines, " " .. action .. "  / filter  c connected  R discover  q close")
-	table.insert(lines, " r rename  d disconnect")
+	table.insert(lines, " o open  r rename  d disconnect")
 	vim.bo[s.buf].modifiable = true
 	api.nvim_buf_set_lines(s.buf, 0, -1, false, lines)
 	vim.bo[s.buf].modifiable = false
@@ -360,6 +361,9 @@ function M.open(opts)
 	map(s.buf, "<CR>", function()
 		act(opts.on_select)
 	end, "Select harness")
+	map(s.buf, "o", function()
+		act(opts.on_open)
+	end, "Open harness")
 	map(s.buf, "d", function()
 		local callback = opts.on_disconnect or function(entry)
 			registry.disconnect(entry.key)
@@ -440,6 +444,16 @@ function M.open(opts)
 					end
 				end)
 			end
+		end,
+	})
+	api.nvim_create_autocmd({ "BufWinEnter", "WinClosed", "TermClose" }, {
+		group = s.augroup,
+		callback = function()
+			vim.schedule(function()
+				if M.state == s then
+					render()
+				end
+			end)
 		end,
 	})
 	s.unsubscribe = registry.on_change(function()

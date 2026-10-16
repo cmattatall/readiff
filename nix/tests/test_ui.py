@@ -561,7 +561,7 @@ class EditorUI(unittest.TestCase):
                 end
                 return system(argv,opts,callback)
             end
-            vim.fn.confirm=function(prompt) vim.g.resume_prompt=prompt; return 1 end
+            vim.fn.confirm=function(prompt) vim.g.resume_prompt=prompt; return 2 end
         """
         for provider in ("amp", "omp"):
             with self.subTest(provider=provider):
@@ -585,7 +585,14 @@ class EditorUI(unittest.TestCase):
 
                 editor = self.launch(self.root, file="auth.lua", before_init=bridge)
                 self.keys(editor, ":harness open<CR>")
-                self.wait_for(editor, "vim.bo.filetype=='rediff-harness-panel'")
+                if provider == "amp":
+                    self.wait_for(editor, "vim.g.resume_prompt ~= nil")
+                    self.assertNotEqual(
+                        "rediff-harness-panel",
+                        editor.current.buffer.options["filetype"],
+                    )
+                else:
+                    self.wait_for(editor, "vim.bo.filetype=='rediff-harness-panel'")
                 self.assertEqual(
                     [
                         provider + "-live",
@@ -597,11 +604,153 @@ class EditorUI(unittest.TestCase):
                         "local t=require('rediff.connections').connected()[1]; return {t.name,t.session,t.root}",
                     ),
                 )
-                self.keys(editor, "q:harness resume<CR>")
-                self.wait_for(editor, "vim.bo.filetype=='rediff-harness-panel'")
-                self.assertIsNone(editor.vars.get("resume_prompt"))
-                self.assertFalse(log.exists(), "Reconnect must not start another CLI")
-                self.keys(editor, "q:harness disconnect<CR>")
+                self.keys(
+                    editor, ("q" if provider == "omp" else "") + ":harness resume<CR>"
+                )
+                if provider == "omp":
+                    self.wait_for(editor, "vim.bo.filetype=='rediff-harness-panel'")
+                    self.assertIsNone(editor.vars.get("resume_prompt"))
+                else:
+                    self.assertIn(
+                        "Stop using its other terminal", editor.vars["resume_prompt"]
+                    )
+                self.assertFalse(
+                    log.exists(), "Cancelled resume must not start another CLI"
+                )
+                self.keys(
+                    editor,
+                    ("q" if provider == "omp" else "") + ":harness disconnect<CR>",
+                )
+
+    def test_open_live_amp_sessions_in_terminal_from_command_and_list(self):
+        binary = Path(self.directory.name, "bin")
+        binary.mkdir()
+        log = Path(self.directory.name, "live-open-launches")
+        cli = binary / "amp"
+        cli.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            "with open(os.environ['HARNESS_TEST_LOG'], 'a') as log:\n"
+            "    log.write(json.dumps([os.getcwd(), sys.argv[1:]]) + '\\n')\n"
+            "print('Live session resumed', flush=True)\n"
+            "while True: print('received:' + input(), flush=True)\n"
+        )
+        cli.chmod(0o755)
+        os.environ["PATH"] = str(binary) + os.pathsep + os.environ["PATH"]
+        os.environ["HARNESS_TEST_LOG"] = str(log)
+        remote = Path(self.directory.name, "other-repository").resolve()
+        remote.mkdir()
+        threads = [f"T-{i:08d}-1111-2222-3333-444444444444" for i in (1, 2, 3)]
+        editor = self.launch(self.root)
+        editor.exec_lua(
+            STATE
+            + """
+            require('rediff.live').stop(s)
+            local remote, ids = ...
+            local rows = {
+                {provider='amp',name='amp-live',root=s.root,session=ids[1],title='Local One',connection='/old/one'},
+                {provider='amp',name='amp-live',root=s.root,session=ids[2],title='Local Two',connection='/old/two'},
+                {provider='amp',name='amp-live',root=remote,session=ids[3],title='Remote',connection='/old/remote'},
+            }
+            local system = vim.system
+            vim.system = function(argv,opts,callback)
+                if (argv[1]=='rediff-live' or argv[1]=='rediff-amp-live') and argv[2]=='discover' then
+                    local result = vim.deepcopy(rows)
+                    if vim.fn.filereadable(vim.env.HARNESS_TEST_LOG)==1 then
+                        for _,line in ipairs(vim.fn.readfile(vim.env.HARNESS_TEST_LOG)) do
+                            local launched = vim.json.decode(line)
+                            for _,row in ipairs(result) do
+                                if row.session==launched[2][3] then row.connection='/resumed/'..row.session end
+                            end
+                        end
+                    end
+                    if argv[1]=='rediff-amp-live' then
+                        result=vim.tbl_filter(function(row) return row.root==argv[3] end,result)
+                    end
+                    callback({code=0,stdout=vim.json.encode(result)})
+                    return {}
+                end
+                return system(argv,opts,callback)
+            end
+            require('rediff.harness').select(s.root,rows[1])
+            require('rediff.harness').select(s.root,rows[2])
+            vim.g.resume_choice=2
+            vim.fn.confirm=function(prompt,_,default)
+                assert(default==2)
+                vim.g.resume_prompt=prompt
+                return vim.g.resume_choice
+            end
+            """,
+            str(remote),
+            threads,
+        )
+        self.keys(editor, ":ho<CR>1<CR>")
+        self.assertIn(threads[0], editor.vars["resume_prompt"])
+        self.assertIn("Stop using its other terminal", editor.vars["resume_prompt"])
+        self.assertFalse(log.exists(), "Cancelling must not resume the live session")
+        self.lua(editor, "vim.g.resume_choice=1")
+        self.keys(editor, ":hl<CR>o")
+        self.wait_for(editor, "vim.bo.buftype=='terminal'")
+        first_job = editor.current.buffer.vars["terminal_job_id"]
+        pane = editor.current.window.handle
+        self.keys(editor, "hello<CR>")
+        self.wait_for(
+            editor,
+            "table.concat(vim.api.nvim_buf_get_lines(0,0,-1,false),'\\n'):find('received:hello',1,true) ~= nil",
+        )
+        self.wait_for(
+            editor, "require('rediff.harness').get(s.root).connection_error == nil"
+        )
+        self.keys(editor, "<Esc>:hl<CR>")
+        self.assertIn(
+            "Local One",
+            next(line for line in editor.current.buffer[:] if "[open]" in line),
+        )
+        self.keys(editor, "jo")
+        self.wait_for(
+            editor,
+            "vim.bo.buftype=='terminal' and vim.b.terminal_job_id ~= " + str(first_job),
+        )
+        second_job = editor.current.buffer.vars["terminal_job_id"]
+        self.assertEqual(pane, editor.current.window.handle)
+        self.keys(editor, "<Esc>:hl<CR>")
+        self.assertIn(
+            "Local Two",
+            next(line for line in editor.current.buffer[:] if "[open]" in line),
+        )
+        self.keys(editor, "jjo")
+        self.wait_for(
+            editor,
+            "vim.bo.buftype=='terminal' and vim.fn.getcwd()=="
+            + json.dumps(str(remote)),
+        )
+        self.assertEqual(pane, editor.current.window.handle)
+        self.assertEqual(self.root, self.lua(editor, "return s.root"))
+        self.assertEqual(
+            threads[1],
+            self.lua(editor, "return s.harness.session"),
+            "Opening another repository must not redirect this review's feedback",
+        )
+        self.wait_for(
+            editor,
+            "require('rediff.harness').get(vim.fn.getcwd()).connection_error == nil",
+        )
+        self.keys(editor, "<Esc>:hl<CR>")
+        self.assertIn(
+            "Remote",
+            next(line for line in editor.current.buffer[:] if "[open]" in line),
+        )
+        self.keys(editor, "jo")
+        self.assertEqual(second_job, editor.current.buffer.vars["terminal_job_id"])
+        self.assertEqual(pane, editor.current.window.handle)
+        self.assertEqual(
+            [
+                [root, ["threads", "continue", thread]]
+                for root, thread in zip([self.root, self.root, str(remote)], threads)
+            ],
+            [json.loads(line) for line in log.read_text().splitlines()],
+            "Each chosen live session starts once, in its own directory",
+        )
 
     def test_resumed_harness_reconnects_before_flushing_annotations(self):
         binary = Path(self.directory.name, "bin")
@@ -5717,25 +5866,73 @@ with open(sys.argv[1], 'ab', buffering=0) as log:
             "Selecting an owned session must reuse it",
         )
         self.assertEqual("session-b", self.lua(editor, "return s.harness.session"))
-        # Multiple local sessions still use the explicitly selected local default.
+        # Explicit open must offer other local sessions even with a selected default.
         self.keys(editor, "<Esc>")
         self.lua(
             editor,
             "require('rediff.connections').connect({name='claude',root=s.root,session='session-c'})",
         )
-        self.keys(editor, ":ho<CR>")
-        self.assertEqual(other_job, editor.current.buffer.vars["terminal_job_id"])
-        # Without a default, prompt for only this worktree's sessions.
-        self.keys(editor, "<Esc>")
-        self.lua(editor, "require('rediff.harness').select(s.root,{name='none'})")
+        pane = editor.current.window.handle
         self.keys(editor, ":ho<CR>")
         self.keys(editor, "<CR>")  # Cancel without launching anything.
         self.assertEqual(2, len(log.read_text().splitlines()))
-        self.keys(editor, ":ho<CR>1<CR>")
+        self.assertEqual("session-b", self.lua(editor, "return s.harness.session"))
+        self.keys(editor, ":ho<CR>2<CR>")
+        self.wait_for(editor, "#vim.fn.readfile(vim.env.HARNESS_TEST_LOG)==3")
+        self.assertEqual(str(other) + "|session-c", log.read_text().splitlines()[2])
+        third_job = editor.current.buffer.vars["terminal_job_id"]
+        self.assertNotEqual(other_job, third_job)
+        self.assertEqual(pane, editor.current.window.handle)
+        self.assertEqual("session-c", self.lua(editor, "return s.harness.session"))
+        self.keys(editor, "<Esc>:ho<CR>1<CR>")
         self.assertEqual(other_job, editor.current.buffer.vars["terminal_job_id"])
         self.assertEqual("session-b", self.lua(editor, "return s.harness.session"))
-        self.keys(editor, "<Esc>:ho<CR>")
+        # The list's o opens its highlighted row, rather than toggling connection
+        # or reopening the currently selected default. Reuse the same pane/jobs.
+        self.keys(editor, "<Esc>:hl<CR>")
+
+        def open_rows():
+            return [line for line in editor.current.buffer[:] if "[open]" in line]
+
+        self.assertEqual(1, len(open_rows()))
+        self.assertIn("session-b", open_rows()[0])
+        self.keys(editor, "jj")
+        self.assertNotIn(
+            "[open]", editor.current.line, "Cursor selection is not the open terminal"
+        )
+        self.assertIn("session-c", editor.current.line)
+        self.assertIn("session-b", open_rows()[0])
+        self.keys(editor, "o")
+        self.assertEqual(third_job, editor.current.buffer.vars["terminal_job_id"])
+        self.assertEqual(pane, editor.current.window.handle)
+        self.assertEqual("session-c", self.lua(editor, "return s.harness.session"))
+        self.assertIsNone(
+            self.lua(editor, "return require('rediff.harness_panel').state")
+        )
+        self.keys(editor, "<Esc>:hl<CR>")
+        self.assertEqual(1, len(open_rows()))
+        self.assertIn("session-c", open_rows()[0])
+        # Disconnecting changes the feedback target, not the visible terminal.
+        self.keys(editor, "jjd")
+        self.assertEqual("none", self.lua(editor, "return s.harness.name"))
+        self.assertEqual(1, len(open_rows()))
+        self.keys(editor, "o")
+        self.assertEqual(third_job, editor.current.buffer.vars["terminal_job_id"])
+        self.keys(editor, "<Esc>:hl<CR>jo")
         self.assertEqual(other_job, editor.current.buffer.vars["terminal_job_id"])
+        self.assertEqual(pane, editor.current.window.handle)
+        self.assertEqual(
+            3, self.lua(editor, "return #require('rediff.connections').connected()")
+        )
+        self.assertEqual(3, len(log.read_text().splitlines()))
+        self.keys(editor, "<Esc>:hl<CR>o")
+        self.assertEqual(local_job, editor.current.buffer.vars["terminal_job_id"])
+        self.assertEqual(pane, editor.current.window.handle)
+        self.assertEqual(self.root, editor.funcs.getcwd())
+        self.assertEqual("session-b", self.lua(editor, "return s.harness.session"))
+        self.keys(editor, "<Esc>:hide<CR>:hl<CR>")
+        self.assertEqual([], open_rows(), "A hidden terminal is not marked open")
+        self.keys(editor, "q")
 
     def test_worktree_delete_protects_data_and_other_editors(self):
         target = Path(self.directory.name, "linked worktree")

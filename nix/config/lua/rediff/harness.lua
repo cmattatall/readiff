@@ -293,6 +293,17 @@ function M.launch_command(root)
 	return { executable }
 end
 
+function M.is_open(target)
+	for _, win in ipairs(api.nvim_tabpage_list_wins(0)) do
+		local buf = api.nvim_win_get_buf(win)
+		local owned = (jobs[target.root] or {})[vim.b[buf].terminal_job_id]
+		if owned and owned.session == target.session and owned.provider == feedback.provider(target) then
+			return true
+		end
+	end
+	return false
+end
+
 local function terminal_pane(root, buf)
 	local pane
 	for _, win in ipairs(api.nvim_tabpage_list_wins(0)) do
@@ -510,7 +521,7 @@ local function reconnect(root, target, fallback, connected, request)
 	end)
 end
 
-function M.open(root, startup, request)
+function M.open(root, startup, request, key)
 	root = root or current().root
 	-- Amp is the first adapter for the shared connect -> resume -> fresh policy.
 	-- Other providers should implement the same policy, not parallel startup rules.
@@ -539,12 +550,16 @@ function M.open(root, startup, request)
 		end
 	end
 	choices = vim.tbl_filter(function(choice)
+		if key then
+			return choice.target and choice.target.key == key
+		end
 		return choice.root == root
 	end, choices)
+	assert(not key or #choices == 1, "Harness disconnected; select it again in :harness list")
 	local session = M.get(root)
 	local automatic = startup and #choices <= 1 and not session.confirm_resume
 	local selected = session.target
-	if selected.session then
+	if startup and selected.session then
 		local preferred
 		for _, choice in ipairs(choices) do
 			local target = choice.target or choice.owned
@@ -617,8 +632,9 @@ function M.open(root, startup, request)
 			local target = choice.target and connections.get(choice.target.key)
 			if choice.target then
 				assert(target and target.connected, "Harness disconnected; run :ho again")
-				if target.name ~= selected.name or target.session ~= selected.session then
-					M.select(root, target)
+				local bound = M.get(choice.root).target
+				if target.name ~= bound.name or target.session ~= bound.session then
+					M.select(choice.root, target)
 				end
 			end
 			if choice.owned then
@@ -626,6 +642,10 @@ function M.open(root, startup, request)
 				terminal_pane(choice.root, choice.owned.buf)
 				vim.cmd.startinsert()
 				finish_opening(request)
+			elseif not startup and feedback.provider(target) ~= "omp" then
+				-- Explicit open means an interactive terminal, including live sessions.
+				-- Resume asks before starting a new CLI; automatic discovery never does.
+				M.resume(target, false, request, true)
 			elseif feedback.is_live(target) then
 				-- A saved binding is not proof that its process is still alive.
 				reconnect(root, target, function()
@@ -712,10 +732,12 @@ function M.startup(root, explicit, request)
 							M.open(root, nil, request)
 						else
 							finish_opening(request)
+							notify(
+								"Connected to Amp "
+									.. target.session
+									.. " in its existing terminal; no new process started"
+							)
 						end
-						notify(
-							"Connected to Amp " .. target.session .. " in its existing terminal; no new process started"
-						)
 					end
 					if #decision.matches == 1 then
 						connect(decision.matches[1])
@@ -773,9 +795,11 @@ function M.startup(root, explicit, request)
 end
 
 local function resume(selected, automatic, request)
-	local s = current()
-	local target, epoch = vim.deepcopy(selected or s.target), s.epoch
-	local root = target.root or s.root
+	local source = current()
+	local target = vim.deepcopy(selected or source.target)
+	local root = target.root or source.root
+	local s = M.get(root)
+	local epoch, source_epoch = s.epoch, source.epoch
 	local provider = feedback.provider(target)
 	assert(not feedback.busy(root), "Wait for feedback delivery before resuming the harness")
 	assert(
@@ -803,7 +827,10 @@ local function resume(selected, automatic, request)
 		finish_opening(request)
 		return
 	end
-	assert(current().root == s.root and s.epoch == epoch, "Checkout or harness changed; run :harness resume again")
+	assert(
+		current().root == source.root and source.epoch == source_epoch and s.epoch == epoch,
+		"Checkout or harness changed; run :harness resume again"
+	)
 	assert(vim.fn.isdirectory(root) == 1, "Harness worktree is unavailable: " .. root)
 	local argv = provider == "amp" and { executable, "threads", "continue", target.session }
 		or { executable, "--resume", target.session }
@@ -865,7 +892,7 @@ local function resume(selected, automatic, request)
 	end
 end
 
-function M.resume(selected, automatic, request)
+function M.resume(selected, automatic, request, interactive)
 	local s = current()
 	local target = vim.deepcopy(selected or s.target)
 	local root = target.root or s.root
@@ -881,9 +908,15 @@ function M.resume(selected, automatic, request)
 		M.open(root, nil, request)
 		return
 	end
+	if interactive then
+		resume(target, false, request)
+		return
+	end
 	reconnect(root, target, function()
 		resume(target, automatic, request)
-	end, nil, request)
+	end, automatic and function()
+		finish_opening(request)
+	end or nil, request)
 end
 
 function M.stop(root)
@@ -1043,13 +1076,44 @@ function M.disconnect(entry)
 	end
 end
 
+local function open_requested(root, key)
+	if opening then
+		return
+	end
+	local request = {}
+	opening = request
+	local ok, err = pcall(function()
+		show_opening(request)
+		M.open(root, nil, request, key)
+	end)
+	if not ok then
+		finish_opening(request)
+		notify(tostring(err), "failed")
+	end
+end
+
 function M.panel(purpose, provider)
+	local panel = require("rediff.harness_panel")
+	panel.close()
 	local root = current().root
 	local source = M.get(root)
 	local epoch = source.epoch
-	return require("rediff.harness_panel").open({
+	local win = api.nvim_get_current_win()
+	return panel.open({
 		root = root,
 		provider = provider,
+		on_open = function(entry)
+			assert(api.nvim_win_is_valid(win) and api.nvim_win_call(win, function()
+				return current().root == root
+			end), "Checkout changed; run :harness list again")
+			entry = assert(connections.get(entry.key), "Harness is no longer available")
+			if not entry.connected then
+				connections.connect(entry)
+			end
+			panel.close()
+			api.nvim_set_current_win(win)
+			open_requested(root, entry.key)
+		end,
 		on_select = function(entry)
 			if purpose == "connect" and source.epoch ~= epoch then
 				return
@@ -1171,7 +1235,6 @@ function M.setup()
 		if opening then
 			return
 		end
-		local request
 		local ok, err = pcall(function()
 			local args = opts.fargs
 			if args[1] == "connect" and (#args == 1 or (#args == 2 and (args[2] == "amp" or args[2] == "omp"))) then
@@ -1183,11 +1246,7 @@ function M.setup()
 			elseif #args == 1 and (args[1] == "list" or args[1] == "panel") then
 				M.panel("manage")
 			elseif #args == 1 and args[1] == "open" then
-				local root = current().root
-				request = {}
-				opening = request
-				show_opening(request)
-				M.open(root, nil, request)
+				open_requested(current().root)
 			elseif #args == 1 and args[1] == "resume" then
 				M.resume()
 			elseif #args == 2 and args[1] == "use" then
@@ -1221,7 +1280,6 @@ function M.setup()
 			end
 		end)
 		if not ok then
-			finish_opening(request)
 			notify(tostring(err), "failed")
 		end
 	end, {
