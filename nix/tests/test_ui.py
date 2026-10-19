@@ -142,6 +142,17 @@ class EditorUI(unittest.TestCase):
         index = git("write-tree")
         status = git("status", "--porcelain")
         editor = self.launch(self.root)
+        self.keys(editor, ":git b<Tab>")
+        self.assertEqual("Git base", editor.funcs.getcmdline())
+        self.keys(editor, f" {base[:12]}<CR>")
+        self.lua(
+            editor,
+            "for i,e in ipairs(s.entries) do if e.path=='auth.lua' then r.show(i) end end",
+        )
+        self.assertEqual(
+            [base, git("rev-parse", "HEAD"), "unrelated HEAD\n"],
+            self.lua(editor, "return {s.current.base, s.current.head, s.current.new}"),
+        )
         self.keys(editor, ":ReviewLeave<CR>:git d<Tab>")
         self.assertEqual("Git diff", editor.funcs.getcmdline())
         self.keys(editor, f" {base[:12]} review-target<CR>")
@@ -181,12 +192,33 @@ class EditorUI(unittest.TestCase):
             self.assertIn("Staging is unavailable", editor.vars["startup_notice"])
             self.assertEqual(index, git("write-tree"))
         # An annotation remains attached to the pinned target after refs move.
+        self.lua(
+            editor,
+            "for i,e in ipairs(s.entries) do if e.path=='auth.lua' then r.show(i) end end",
+        )
         self.keys(editor, "17GiPinned commit note<Esc>:w<CR>")
         self.assertEqual(1, self.lua(editor, "return #s.comments"))
         snapshot = self.lua(editor, "return s.current.id")
         git("branch", "-f", "review-target", "HEAD")
         self.keys(editor, " R")
         self.assertEqual(snapshot, self.lua(editor, "return s.current.id"))
+        # Changing only the base must not resolve the moved target branch again
+        # or replace the pinned target with the unrelated current HEAD.
+        self.keys(editor, f":git base {target}<CR>")
+        self.assertEqual(
+            [target, target, 0],
+            self.lua(editor, "return {s.comparison.base, s.comparison.head, #s.entries}"),
+        )
+        editor.command(f"Git base {base}")
+        self.lua(
+            editor,
+            "for i,e in ipairs(s.entries) do if e.path=='auth.lua' then r.show(i) end end",
+        )
+        self.assertEqual(snapshot, self.lua(editor, "return s.current.id"))
+        self.assertEqual(1, self.lua(editor, "return #s.comments"))
+        for args in ("", "does-not-exist", "--all", f"{base} {target}"):
+            self.keys(editor, f":git base {args}<CR>")
+            self.assertEqual(snapshot, self.lua(editor, "return s.current.id"))
         self.assertTrue(
             self.lua(
                 editor,

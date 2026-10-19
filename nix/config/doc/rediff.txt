@@ -67,7 +67,7 @@ TARGET on the NEW side. Use full/short SHAs, branches, tags, or refs like HEAD~2
 For example: :git diff main HEAD or :git diff a1b2c3d e4f5a6b.
 Typed :gd BASE TARGET is a shortcut, in Review or ordinary editing.
 Scripts should use :Git diff. Normal-mode gd still finds symbol definitions.
-Tab completes the diff subcommand; other Git subcommands are not supported.
+Tab completes base and diff; other Git subcommands are not supported.
 This is an exact endpoint diff, not a merge-base (three-dot) comparison.
 Both refs are resolved to fixed SHAs when opened. Space R refreshes those same
 commits; run :git diff again to pick up a moved branch. Local staged, unstaged,
@@ -75,6 +75,11 @@ and untracked changes are excluded. Renames appear as a deletion and addition.
 Split/merged views, file/hunk navigation, and annotations work as in Review.
 Staging and :fs/:fu are unavailable here. :Review returns to worktree changes;
 Space q leaves for editing. Notes retain their original commit snapshots.
+
+:git base BASE changes only the base of the current comparison, preserving its
+pinned target SHA. Without a commit comparison, it compares BASE against the
+current HEAD. For example: :git base HEAD~3. It never checks out a commit or
+changes local files/index. Scripts should use :Git base BASE.
 
 ANNOTATING ORDINARY FILES
 
@@ -500,6 +505,7 @@ Scripts use uppercase names below. Typed aliases: :harness = :Harness,
 
   :Review / :ReviewLeave       Enter worktree Review / leave Review
   :Git diff BASE TARGET       Compare two commits (SHAs, branches, or tags)
+  :Git base BASE              Change base, retaining target (defaults to HEAD)
   :Explorer / :FocusDiff       Focus tree / diff or editor
   :Files / :Search             Fuzzy file / text search
   :Commands                   Find available commands

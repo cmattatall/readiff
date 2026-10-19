@@ -62,7 +62,12 @@ changes, preserving notes and their original snapshots.
 
 Typed **`:gd BASE TARGET`** is a shortcut for `:git diff`, both inside and outside
 Review. Normal-mode `gd` is unchanged. Scripts should use `:Git diff` directly.
-Tab completes `diff`; this command does not run other Git subcommands.
+
+**`:git base BASE`** changes only the base, keeping the current comparison's
+target SHA pinned. If no commit comparison is open, it compares BASE against
+the current `HEAD`. It does not check out commits or change local files/index.
+Scripts can use `:Git base BASE`. Tab completes `base` and `diff`; other Git
+subcommands are not supported.
 
 **Ctrl-A / Ctrl-E** move to the start/end of the line in Insert mode (files
 and annotations) and in command/search input. Normal-mode
