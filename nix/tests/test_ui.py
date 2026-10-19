@@ -115,6 +115,135 @@ class EditorUI(unittest.TestCase):
             self.assertLess(time.monotonic(), deadline, condition)
             pump(editor)
 
+    def test_branch_diff_pins_two_commits_without_touching_worktree(self):
+        def git(*args):
+            return (
+                subprocess.check_output(["git", "-C", self.root, *args])
+                .decode()
+                .strip()
+            )
+
+        base = git("rev-parse", "HEAD")
+        old = git("show", "HEAD:auth.lua") + "\n"
+        new = Path(self.root, "auth.lua").read_text()
+        # A pathspec-looking filename must be interpreted literally.
+        Path(self.root, "plan.md").rename(Path(self.root, ":(glob)plan.md"))
+        git("add", "-A")
+        git("commit", "-qm", "Target")
+        target = git("rev-parse", "HEAD")
+        git("branch", "review-target", target)
+        Path(self.root, "auth.lua").write_text("unrelated HEAD\n")
+        git("add", "auth.lua")
+        git("commit", "-qm", "Unrelated HEAD")
+        Path(self.root, "auth.lua").write_text("index only\n")
+        git("add", "auth.lua")
+        Path(self.root, "auth.lua").write_text("worktree only\n")
+        Path(self.root, "untracked.txt").write_text("not part of comparison\n")
+        index = git("write-tree")
+        status = git("status", "--porcelain")
+        editor = self.launch(self.root)
+        self.keys(editor, f":ReviewLeave<CR>:gd {base[:12]} review-target<CR>")
+        self.assertEqual(
+            {":(glob)plan.md": "A", "auth.lua": "M", "removed.lua": "D"},
+            self.lua(
+                editor,
+                "local t={}; for _,e in ipairs(s.entries) do t[e.path]=e.status end; return t",
+            ),
+        )
+        self.lua(
+            editor,
+            "for i,e in ipairs(s.entries) do if e.path=='auth.lua' then r.show(i) end end",
+        )
+        self.assertEqual(
+            [base, target, old, new, False],
+            self.lua(
+                editor,
+                "return {s.current.base, s.current.head, s.current.old, s.current.new, s.live_refresh == true}",
+            ),
+        )
+        self.assertTrue(
+            self.lua(editor, "return r.statusline():find('BRANCH DIFF',1,true) ~= nil")
+        )
+        for layout in ("merged", "split"):
+            self.keys(editor, f":View {layout}<CR>")
+            self.assertTrue(
+                self.lua(
+                    editor,
+                    "return #s.diff.changes == 2 and not vim.bo[s.new_buf].modifiable",
+                )
+            )
+            self.keys(editor, " ehl")
+            self.assertEqual("auth.lua", self.lua(editor, "return s.current.path"))
+            self.keys(editor, "<Tab>]sS")
+            self.assertIn("Staging is unavailable", editor.vars["startup_notice"])
+            self.assertEqual(index, git("write-tree"))
+        # An annotation remains attached to the pinned target after refs move.
+        self.keys(editor, "17GiPinned commit note<Esc>:w<CR>")
+        self.assertEqual(1, self.lua(editor, "return #s.comments"))
+        snapshot = self.lua(editor, "return s.current.id")
+        git("branch", "-f", "review-target", "HEAD")
+        self.keys(editor, " R")
+        self.assertEqual(snapshot, self.lua(editor, "return s.current.id"))
+        self.assertTrue(
+            self.lua(
+                editor,
+                "return pcall(require('rediff.git').validate, s.root, s.current)",
+            )
+        )
+        for args in ("does-not-exist HEAD", "HEAD", "HEAD HEAD extra", "--all HEAD"):
+            self.keys(editor, f":BranchDiff {args}<CR>")
+            self.assertEqual(snapshot, self.lua(editor, "return s.current.id"))
+        # Reverse order reverses additions/deletions, independently of HEAD.
+        self.keys(editor, f":gd {target} {base}<CR>")
+        self.assertEqual(
+            {":(glob)plan.md": "D", "auth.lua": "M", "removed.lua": "A"},
+            self.lua(
+                editor,
+                "local t={}; for _,e in ipairs(s.entries) do t[e.path]=e.status end; return t",
+            ),
+        )
+        self.lua(
+            editor,
+            "for i,e in ipairs(s.entries) do if e.path=='auth.lua' then r.show(i) end end",
+        )
+        self.assertEqual(
+            [new, old], self.lua(editor, "return {s.current.old,s.current.new}")
+        )
+        self.keys(editor, "5GiReverse comparison note<Esc>:w<CR>")
+        self.lua(editor, "r.refresh_annotations(s.root)")
+        self.assertEqual(
+            ["current", "current"],
+            sorted(self.lua(editor, "return vim.tbl_values(s.annotation_status)")),
+        )
+        self.keys(editor, f":BranchDiff {base} {base}<CR>")
+        self.assertEqual(0, self.lua(editor, "return #s.entries"))
+        self.assertIn(
+            "No differences", self.lua(editor, "return vim.wo[s.new_win].winbar")
+        )
+        self.keys(editor, "hl:View merged<CR>:ReviewRefresh<CR>")
+        self.assertIn(
+            "No differences", self.lua(editor, "return vim.wo[s.new_win].winbar")
+        )
+        self.keys(editor, ":Review<CR>")
+        self.assertEqual(
+            ["staged", "unstaged", "untracked"],
+            self.lua(
+                editor, "return vim.tbl_map(function(e) return e.group end,s.entries)"
+            ),
+        )
+        self.assertEqual("index only\n", self.lua(editor, "return s.current.new"))
+        self.assertEqual(2, self.lua(editor, "return #s.comments"))
+        self.assertEqual(
+            [base, target],
+            self.lua(
+                editor,
+                "local n=s.snapshots[s.comments[1].snapshot_id]; return {n.base,n.head}",
+            ),
+        )
+        self.assertEqual(index, git("write-tree"))
+        self.assertEqual(status, git("status", "--porcelain"))
+        self.assertEqual("worktree only\n", Path(self.root, "auth.lua").read_text())
+
     def test_ctrl_shift_brackets_skip_seen_and_baseline_hunks(self):
         path = Path(self.root, "zeta.txt")
         lines = [f"line {i}\n" for i in range(1, 61)]

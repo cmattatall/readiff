@@ -51,6 +51,18 @@ ordinary editing without a sidebar.
 If Review is locked by another editor or cannot open, startup reports the
 reason and leaves ordinary editing available. Startup never sends feedback.
 
+To compare two commits, enter **`:BranchDiff BASE TARGET`**, for example
+`:BranchDiff main HEAD` or `:BranchDiff HEAD~3 HEAD~1`. Full and abbreviated SHAs,
+branches, and tags are accepted. OLD shows BASE; NEW shows TARGET. This compares
+the two endpoints directly, not their merge base, and excludes local changes.
+Both refs are pinned to SHAs until you run `:BranchDiff` again. Split/merged views,
+navigation, and annotations remain available; staging is disabled. Renames appear
+as a deletion and addition. **`:Review`** returns to staged/unstaged worktree
+changes, preserving notes and their original snapshots.
+
+Typed **`:gd BASE TARGET`** is a shortcut for `:BranchDiff`, both inside and outside
+Review. Normal-mode `gd` is unchanged. Scripts should use `:BranchDiff` directly.
+
 **Ctrl-A / Ctrl-E** move to the start/end of the line in Insert mode (files
 and annotations) and in command/search input. Normal-mode
 Vim bindings remain unchanged. Typed **:ft** expands to `:Explorer` and focuses

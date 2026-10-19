@@ -60,6 +60,21 @@ Outside Git, startup stays in ordinary editing without a sidebar.
 Headless runs open neither Review nor the tree. Space r toggles Review.
 The bottom bar shows the branch (or detached @short-SHA), harness and delivery.
 
+BRANCH DIFF MODE
+
+:BranchDiff BASE TARGET compares two commits, with BASE on the OLD side and
+TARGET on the NEW side. Use full/short SHAs, branches, tags, or refs like HEAD~2.
+For example: :BranchDiff main HEAD or :BranchDiff a1b2c3d e4f5a6b.
+Typed :gd BASE TARGET is a shortcut, in Review or ordinary editing.
+Scripts should use :BranchDiff. Normal-mode gd still finds symbol definitions.
+This is an exact endpoint diff, not a merge-base (three-dot) comparison.
+Both refs are resolved to fixed SHAs when opened. Space R refreshes those same
+commits; run :BranchDiff again to pick up a moved branch. Local staged, unstaged,
+and untracked changes are excluded. Renames appear as a deletion and addition.
+Split/merged views, file/hunk navigation, and annotations work as in Review.
+Staging and :fs/:fu are unavailable here. :Review returns to worktree changes;
+Space q leaves for editing. Notes retain their original commit snapshots.
+
 ANNOTATING ORDINARY FILES
 
 Space a (or :AnnotationMode) toggles annotation mode for the current named file
@@ -478,11 +493,12 @@ completes arguments; Ctrl-d lists matches. :command lists user/plugin commands.
 
 Scripts use uppercase names below. Typed aliases: :harness = :Harness,
 :ho = :Harness open, :hl = :Harness list, :hc = :Harness connect,
-:ft = :Explorer, :annotations = :Annotations,
+:ft = :Explorer, :gd = :BranchDiff, :annotations = :Annotations,
 :al = :Annotations list, :worktree = :Worktree. In Review, :view = :View,
 :focus = :Focus, :fs = :Focus staged, :fu = :Focus unstaged.
 
-  :Review / :ReviewLeave       Enter/leave Review
+  :Review / :ReviewLeave       Enter worktree Review / leave Review
+  :BranchDiff BASE TARGET      Compare two commits (SHAs, branches, or tags)
   :Explorer / :FocusDiff       Focus tree / diff or editor
   :Files / :Search             Fuzzy file / text search
   :Commands                   Find available commands
