@@ -2070,15 +2070,27 @@ function M.setup()
 		)
 	end
 	api.nvim_create_user_command(
-		"BranchDiff",
+		"Git",
 		guard(function(opts)
-			assert(#opts.fargs == 2, "Usage: BranchDiff BASE TARGET (commit SHAs, branches, or tags)")
+			assert(
+				opts.fargs[1] == "diff" and #opts.fargs == 3,
+				"Usage: git diff BASE TARGET (commit SHAs, branches, or tags)"
+			)
 			local root = M.state and M.state.root or git.root()
-			M.open(root, git.comparison(root, opts.fargs[1], opts.fargs[2]))
+			M.open(root, git.comparison(root, opts.fargs[2], opts.fargs[3]))
 		end),
-		{ nargs = "+" }
+		{
+			nargs = "*",
+			complete = function(lead, line, position)
+				if line:sub(1, position):match("^%s*Git%s+%S*$") and vim.startswith("diff", lead) then
+					return { "diff" }
+				end
+				return {}
+			end,
+		}
 	)
-	vim.cmd([[cnoreabbrev <expr> gd getcmdtype() == ':' && getcmdline() == 'gd' && getcmdpos() == 3 ? 'BranchDiff' : 'gd']])
+	vim.cmd([[cnoreabbrev <expr> git getcmdtype() == ':' && getcmdline() == 'git' && getcmdpos() == 4 ? 'Git' : 'git']])
+	vim.cmd([[cnoreabbrev <expr> gd getcmdtype() == ':' && getcmdline() == 'gd' && getcmdpos() == 3 ? 'Git diff' : 'gd']])
 	local commands = {
 		Review = M.open,
 		ReviewLeave = M.leave,

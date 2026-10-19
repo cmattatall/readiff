@@ -142,7 +142,10 @@ class EditorUI(unittest.TestCase):
         index = git("write-tree")
         status = git("status", "--porcelain")
         editor = self.launch(self.root)
-        self.keys(editor, f":ReviewLeave<CR>:gd {base[:12]} review-target<CR>")
+        self.keys(editor, ":ReviewLeave<CR>:git d<Tab>")
+        self.assertEqual("Git diff", editor.funcs.getcmdline())
+        self.keys(editor, f" {base[:12]} review-target<CR>")
+        self.assertEqual(0, editor.funcs.exists(":BranchDiff"))
         self.assertEqual(
             {":(glob)plan.md": "A", "auth.lua": "M", "removed.lua": "D"},
             self.lua(
@@ -191,7 +194,11 @@ class EditorUI(unittest.TestCase):
             )
         )
         for args in ("does-not-exist HEAD", "HEAD", "HEAD HEAD extra", "--all HEAD"):
-            self.keys(editor, f":BranchDiff {args}<CR>")
+            self.keys(editor, f":git diff {args}<CR>")
+            self.assertEqual(snapshot, self.lua(editor, "return s.current.id"))
+        for args in ("", "status", "reset --hard"):
+            self.keys(editor, f":git {args}<CR>")
+            self.assertIn("Usage: git diff", editor.vars["startup_notice"])
             self.assertEqual(snapshot, self.lua(editor, "return s.current.id"))
         # Reverse order reverses additions/deletions, independently of HEAD.
         self.keys(editor, f":gd {target} {base}<CR>")
@@ -215,7 +222,7 @@ class EditorUI(unittest.TestCase):
             ["current", "current"],
             sorted(self.lua(editor, "return vim.tbl_values(s.annotation_status)")),
         )
-        self.keys(editor, f":BranchDiff {base} {base}<CR>")
+        editor.command(f"Git diff {base} {base}")
         self.assertEqual(0, self.lua(editor, "return #s.entries"))
         self.assertIn(
             "No differences", self.lua(editor, "return vim.wo[s.new_win].winbar")

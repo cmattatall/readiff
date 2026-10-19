@@ -62,14 +62,15 @@ The bottom bar shows the branch (or detached @short-SHA), harness and delivery.
 
 BRANCH DIFF MODE
 
-:BranchDiff BASE TARGET compares two commits, with BASE on the OLD side and
+:git diff BASE TARGET compares two commits, with BASE on the OLD side and
 TARGET on the NEW side. Use full/short SHAs, branches, tags, or refs like HEAD~2.
-For example: :BranchDiff main HEAD or :BranchDiff a1b2c3d e4f5a6b.
+For example: :git diff main HEAD or :git diff a1b2c3d e4f5a6b.
 Typed :gd BASE TARGET is a shortcut, in Review or ordinary editing.
-Scripts should use :BranchDiff. Normal-mode gd still finds symbol definitions.
+Scripts should use :Git diff. Normal-mode gd still finds symbol definitions.
+Tab completes the diff subcommand; other Git subcommands are not supported.
 This is an exact endpoint diff, not a merge-base (three-dot) comparison.
 Both refs are resolved to fixed SHAs when opened. Space R refreshes those same
-commits; run :BranchDiff again to pick up a moved branch. Local staged, unstaged,
+commits; run :git diff again to pick up a moved branch. Local staged, unstaged,
 and untracked changes are excluded. Renames appear as a deletion and addition.
 Split/merged views, file/hunk navigation, and annotations work as in Review.
 Staging and :fs/:fu are unavailable here. :Review returns to worktree changes;
@@ -493,12 +494,12 @@ completes arguments; Ctrl-d lists matches. :command lists user/plugin commands.
 
 Scripts use uppercase names below. Typed aliases: :harness = :Harness,
 :ho = :Harness open, :hl = :Harness list, :hc = :Harness connect,
-:ft = :Explorer, :gd = :BranchDiff, :annotations = :Annotations,
+:ft = :Explorer, :git = :Git, :gd = :Git diff, :annotations = :Annotations,
 :al = :Annotations list, :worktree = :Worktree. In Review, :view = :View,
 :focus = :Focus, :fs = :Focus staged, :fu = :Focus unstaged.
 
   :Review / :ReviewLeave       Enter worktree Review / leave Review
-  :BranchDiff BASE TARGET      Compare two commits (SHAs, branches, or tags)
+  :Git diff BASE TARGET       Compare two commits (SHAs, branches, or tags)
   :Explorer / :FocusDiff       Focus tree / diff or editor
   :Files / :Search             Fuzzy file / text search
   :Commands                   Find available commands
